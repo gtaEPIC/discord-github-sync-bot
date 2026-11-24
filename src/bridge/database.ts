@@ -38,6 +38,16 @@ export class Store {
   setMeta(key: string, value: string) {
     this.db.prepare("INSERT OR REPLACE INTO meta VALUES (?,?)").run(key, value);
   }
+  deleteMeta(key: string) {
+    this.db.prepare("DELETE FROM meta WHERE key=?").run(key);
+  }
+  /** Meta entries whose key starts with `prefix`. */
+  metaEntries(prefix: string): [string, string][] {
+    return this.db
+      .prepare("SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?")
+      .all(prefix.length, prefix)
+      .map((r) => [String(r.key), String(r.value)]);
+  }
   links(): Link[] {
     return this.db
       .prepare("SELECT data FROM links")

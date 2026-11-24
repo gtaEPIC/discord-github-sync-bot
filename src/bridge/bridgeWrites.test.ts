@@ -153,6 +153,37 @@ describe("bridge write mode", () => {
       githubId: "999",
     });
   });
+  it("closes and reopens with a reason, and keeps close tags out of the label tags", async () => {
+    const { api } = setup({
+      writeMode: "bridge",
+      closeTags: [
+        { tag: "fixed", reason: "completed" },
+        { tag: "Missing", reason: "duplicate" },
+      ],
+    });
+    Object.assign(api, {
+      forum: {
+        availableTags: [
+          { id: "1", name: "Bug" },
+          { id: "2", name: "Fixed" },
+        ],
+      },
+      labelCache: { names: ["bug", "fixed"], until: Infinity },
+    });
+    expect(await api.closeTags()).toEqual([
+      { id: "2", name: "Fixed", reason: "completed" },
+    ]);
+    expect(await api.managedTags()).toEqual([
+      { id: "1", name: "Bug", label: "bug" },
+    ]);
+    await api.updateIssue(1, { state: "closed", reason: "not_planned" });
+    await api.updateIssue(1, { state: "open" });
+    expect(calls.map((c) => c.args)).toEqual([
+      expect.objectContaining({ state: "closed", state_reason: "not_planned" }),
+      expect.objectContaining({ state: "open", state_reason: "reopened" }),
+    ]);
+    expect(calls.every((c) => c.token === "installation-write")).toBe(true);
+  });
   it("leaves user mode on the linked-account path", async () => {
     const { api } = setup({ writeMode: "user" });
     await api.createComment(1, "body", source);

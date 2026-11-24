@@ -10,7 +10,11 @@
  * - only Discord changed: write GitHub (only when Discord may write, i.e. bridge mode).
  * - both changed: GitHub wins.
  * A missing snapshot means GitHub wins once (upstream behaviour).
+ *
+ * Open/closed is one more field, compared in close-tag space: GitHub's state and reason map
+ * to a close tag (or none), so a fallback tag never rewrites GitHub's `state_reason`.
  */
+import type { CloseReason } from "./config";
 
 /** Discord allows at most five applied tags per forum post. */
 export const MAX_TAGS = 5;
@@ -20,6 +24,13 @@ export interface ManagedTag {
   id: string;
   name: string;
   label: string;
+}
+
+/** A forum tag that closes the issue with a reason. */
+export interface CloseTag {
+  id: string;
+  name: string;
+  reason: CloseReason;
 }
 
 /** Last state both sides agreed on, stored on the link. */
@@ -32,14 +43,27 @@ export interface Snapshot {
   overflow?: string[];
   /** GitHub state at the last reconcile, to tell a reopen from an inactivity archive. */
   state?: "open" | "closed";
+  /**
+   * Agreed close tag id, or null when open. Absent when close tags are not configured or the
+   * link predates them: then GitHub wins once.
+   */
+  closed?: string | null;
+  /** The agreed close tag could not be shown (no free tag slot); its absence is not a reopen. */
+  closedHidden?: boolean;
 }
 
 export interface MetadataInput {
   number: number;
-  github: { title: string; labels: string[] };
+  github: {
+    title: string;
+    labels: string[];
+    state?: "open" | "closed";
+    reason?: string | null;
+  };
   /** Thread name and applied tag ids. */
   discord: { name: string; tags: string[] };
   managed: ManagedTag[];
+  closeTags?: CloseTag[];
   snap?: Snapshot;
   /** False in user mode: Discord-side changes are reverted instead of sent to GitHub. */
   discordWrites: boolean;
@@ -49,7 +73,16 @@ export interface MetadataPlan {
   title: string;
   labels: string[];
   overflow: string[];
-  github: { title?: string; addLabels: string[]; removeLabels: string[] };
+  /** Agreed close tag id, null when open, undefined when close tags are not in use. */
+  closed?: string | null;
+  closedHidden?: boolean;
+  github: {
+    title?: string;
+    addLabels: string[];
+    removeLabels: string[];
+    state?: "open" | "closed";
+    reason?: CloseReason;
+  };
   discord: { name?: string; addTags: string[]; removeTags: string[] };
 }
 
@@ -90,7 +123,12 @@ export function managedTags(
 }
 
 export function planMetadata(input: MetadataInput): MetadataPlan {
-  const { number, github, discord, managed, snap, discordWrites } = input;
+  const { number, github, discord, snap, discordWrites } = input;
+  const closeTags = input.closeTags ?? [];
+  // A tag is either a close tag or a label tag, never both.
+  const managed = input.managed.filter(
+    (m) => !closeTags.some((c) => c.id === m.id),
+  );
 
   // Title.
   let title = github.title;
@@ -118,13 +156,39 @@ export function planMetadata(input: MetadataInput): MetadataPlan {
     if (keep) labels.push(label);
   }
 
-  // Discord tags: unmanaged tags pass through and existing tags are never dropped for space.
+  // Open/closed, in close-tag space.
+  const close = closeField(input, closeTags);
+  const closeIds = new Set(closeTags.map((t) => t.id));
+
+  // Discord tags: unmanaged tags pass through and existing tags are never dropped for space,
+  // except that a close tag outranks label tags (the labels stay on GitHub as overflow).
   const applied = discord.tags.filter((t) => byTag.has(t));
   const removeTags = applied.filter((t) => !labels.includes(byTag.get(t)!));
   const kept = applied.filter((t) => !removeTags.includes(t));
-  const unmanaged = discord.tags.length - applied.length;
-  let free = Math.max(0, MAX_TAGS - unmanaged - kept.length);
+  const unmanaged = discord.tags.filter(
+    (t) => !byTag.has(t) && !closeIds.has(t),
+  ).length;
+  const closeApplied = discord.tags.filter((t) => closeIds.has(t));
+  removeTags.push(...closeApplied.filter((t) => t !== close.closed));
   const addTags: string[] = [];
+  let free = Math.max(
+    0,
+    MAX_TAGS -
+      unmanaged -
+      kept.length -
+      (close.closed && closeApplied.includes(close.closed) ? 1 : 0),
+  );
+  let closedHidden = false;
+  if (close.closed && !closeApplied.includes(close.closed)) {
+    if (!free && kept.length) {
+      removeTags.push(kept.pop()!);
+      free++;
+    }
+    if (free) {
+      addTags.push(close.closed);
+      free--;
+    } else closedHidden = true;
+  }
   const missed: string[] = [];
   for (const label of labels) {
     const tag = byLabel.get(label)!;
@@ -140,10 +204,13 @@ export function planMetadata(input: MetadataInput): MetadataPlan {
     title,
     labels,
     overflow: missed,
+    closed: closeTags.length ? close.closed : undefined,
+    closedHidden: closedHidden || undefined,
     github: {
       title: title !== github.title ? title : undefined,
       addLabels: labels.filter((l) => !g.includes(l)),
       removeLabels: g.filter((l) => !labels.includes(l)),
+      ...close.github,
     },
     discord: {
       name: discord.name !== name ? name : undefined,
@@ -151,4 +218,47 @@ export function planMetadata(input: MetadataInput): MetadataPlan {
       removeTags,
     },
   };
+}
+
+/**
+ * GitHub's state and reason as a close tag: a tag with the same reason (preferring the one
+ * already agreed or applied), else the first close tag as a fallback, so an unmapped reason
+ * is never read as a reopen or rewritten.
+ */
+function githubCloseTag(
+  state: "open" | "closed" | undefined,
+  reason: string | null | undefined,
+  closeTags: CloseTag[],
+  prefer: (string | null | undefined)[],
+): string | null {
+  if (state !== "closed" || !closeTags.length) return null;
+  const matching = closeTags.filter((t) => t.reason === reason);
+  const candidates = matching.length ? matching : closeTags;
+  for (const id of prefer)
+    if (id && candidates.some((t) => t.id === id)) return id;
+  return candidates[0].id;
+}
+
+function closeField(input: MetadataInput, closeTags: CloseTag[]) {
+  const { github, discord, snap, discordWrites } = input;
+  if (!closeTags.length) return { closed: null as string | null, github: {} };
+  const s = snap?.closed;
+  const applied = discord.tags.filter((t) => closeTags.some((c) => c.id === t));
+  // A newly added close tag beats one that was already there.
+  let d: string | null = applied.find((t) => t !== s) ?? applied[0] ?? null;
+  if (d === null && s && snap?.closedHidden) d = s;
+  const g = githubCloseTag(github.state, github.reason, closeTags, [s, d]);
+  const closed = discordWrites && s !== undefined && g === s && d !== s ? d : g;
+  const change: { state?: "open" | "closed"; reason?: CloseReason } = {};
+  if (closed !== g) {
+    if (closed === null) change.state = "open";
+    else {
+      const reason = closeTags.find((t) => t.id === closed)!.reason;
+      if (github.state !== "closed" || github.reason !== reason) {
+        change.state = "closed";
+        change.reason = reason;
+      }
+    }
+  }
+  return { closed, github: change };
 }

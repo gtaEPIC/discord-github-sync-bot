@@ -67,7 +67,11 @@ Writes appear as the actual GitHub user (with GitHub’s app attribution).
 For a public forum where reporters will not link GitHub, open **Admin → Mappings → Settings** and save:
 
 ```json
-{ "writeMode": "bridge", "allowRoles": [], "rateLimit": { "issuesPerHour": 5, "commentsPerHour": 60 } }
+{
+  "writeMode": "bridge",
+  "allowRoles": [],
+  "rateLimit": { "issuesPerHour": 5, "commentsPerHour": 60 }
+}
 ```
 
 - Discord → GitHub writes (new issues, comments, edits, deletion tombstones, `/issue close|reopen`) then use a GitHub App installation token minted with **Issues: write** for that one repository. They appear as the App's bot user, with a `**Name** on Discord` header and a signed relay marker. Nobody needs to link GitHub, and `/issue close|reopen` checks only Manage Threads or a manager role.
@@ -142,13 +146,14 @@ The forum is a publishing boundary: human-created posts and replies are eligible
 - GitHub title, body, labels, lock state, and open/closed state update the forum thread and bot-owned summary.
 - **Managed tags** (fork): a forum tag is paired with the repository label of the same name (case-insensitive) or with the label named in the mapping's `labels` setting, for example `{ "labels": { "Feature": "enhancement" } }`. Only managed tags and labels are synced; other tags and labels are never touched, and labels are never created.
 - **Title and tag sync** (fork) is a three-way reconcile against the last agreed state. A change on one side is copied to the other; if both sides changed the same field, GitHub wins. In **bridge** mode, renaming a thread or changing its managed tags updates the issue (the `#N ` prefix is kept on Discord). In **user** mode, Discord title/tag edits are reverted to GitHub's values.
-- Discord shows at most five tags per post: labels that do not fit are kept on GitHub and shown when a slot frees up, and tags already on the post are never dropped for space. Discord allows two renames per thread per ten minutes; extra renames wait for a later scan.
+- **Close tags** (fork): the `closeTags` setting lists forum tags that mean "closed", each with a GitHub close reason, for example `{ "closeTags": [{ "tag": "Fixed", "reason": "completed" }, { "tag": "Won't Fix", "reason": "not_planned" }, { "tag": "Duplicate", "reason": "duplicate" }] }`. Closing or reopening on GitHub sets or removes the matching tag; a reason without its own tag shows the first close tag. In **bridge** mode, applying a close tag closes the issue with that reason and removing every close tag reopens it. Make close tags _moderated_ in the forum settings so only staff can apply them: Discord does not say who changed a tag. Close tags are never synced as labels.
+- Discord shows at most five tags per post: a close tag takes priority over label tags; labels that do not fit are kept on GitHub and shown when a slot frees up, and tags already on the post are never dropped for space. Discord allows two renames per thread per ten minutes; extra renames wait for a later scan.
 - For Discord-origin issues, editing the original starter updates its GitHub body.
 - Long GitHub content is split across messages. Shortening content leaves placeholders in obsolete parts.
 - Deleted source comments/messages become deletion notices in their mirrors. Deleting an entire thread/issue disables its mapping; it does not delete its counterpart or recreate the removed object.
 - Outbound Discord messages disable mentions, including edits.
 
-**Archiving is not closure.** Inactivity auto-archive never changes GitHub state. Use `/issue close` or `/issue reopen`. Inside a synced thread the repository is inferred; elsewhere specify `repository:owner/repo` and `number:123` when multiple repositories are mapped. Close/reopen require a linked GitHub account with repository permission, plus access to the forum and Manage Threads there or one of its configured manager roles. `/issue status` shows the linked issue.
+**Archiving is not closure.** Inactivity auto-archive never changes GitHub state. Use `/issue close` or `/issue reopen` (or, in bridge mode, a close tag). Inside a synced thread the repository is inferred; elsewhere specify `repository:owner/repo` and `number:123` when multiple repositories are mapped. Close/reopen require a linked GitHub account with repository permission (user mode only), plus access to the forum and Manage Threads there or one of its configured manager roles. `/issue status` shows the linked issue.
 
 ## Webhooks and polling
 

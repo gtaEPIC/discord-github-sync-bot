@@ -16,7 +16,7 @@ import {
   Post,
   ThreadMeta,
 } from "./types";
-import { ManagedTag } from "./reconcile";
+import { CloseTag, ManagedTag } from "./reconcile";
 
 class Fake implements Platforms {
   gh: Issue[] = [];
@@ -85,6 +85,8 @@ class Fake implements Platforms {
   managed: ManagedTag[] = [];
   meta = new Map<string, ThreadMeta>();
   managedTags = vi.fn(async () => structuredClone(this.managed));
+  close: CloseTag[] = [];
+  closeTags = vi.fn(async () => structuredClone(this.close));
   threadMeta = vi.fn(async (thread: string) => {
     const meta = this.meta.get(thread);
     if (!meta) throw Object.assign(new Error("Not found"), { status: 404 });
@@ -111,6 +113,11 @@ class Fake implements Platforms {
   updateIssue = vi.fn(async (number: number, change: IssueChange) => {
     const issue = this.gh.find((i) => i.number === number)!;
     if (change.title !== undefined) issue.title = change.title;
+    if (change.state) {
+      issue.state = change.state;
+      issue.stateReason =
+        change.state === "closed" ? change.reason : "reopened";
+    }
     issue.labels = [
       ...issue.labels.filter((l) => !change.removeLabels?.includes(l)),
       ...(change.addLabels ?? []),
@@ -267,19 +274,35 @@ describe("durable bridge", () => {
     const { engine, api, store } = setup();
     const issue = api.addIssue();
     await engine.github(issue.number);
-    api.state.mockRejectedValue(
+    api.state.mockRejectedValueOnce(
       new WriteBlocked("123", "link", "link required"),
     );
-    await expect(
-      engine.run({
-        type: "state",
-        issue: issue.number,
-        state: "closed",
-        actor: "123",
-      }),
-    ).rejects.toBeInstanceOf(WriteBlocked);
+    const task = {
+      type: "state" as const,
+      issue: issue.number,
+      state: "closed" as const,
+      actor: "123",
+    };
+    // Held, not failed: a failed job would be dropped after its retries.
+    await engine.run(task);
     expect(api.state).toHaveBeenCalledWith(issue.number, "closed", "123");
-    expect(store.health().blocked).toBe(1);
+    expect(store.health()).toMatchObject({ blocked: 1, failed: 0 });
+    // Every scan retries it once (deduplicated) until it goes through.
+    const drain = () => {
+      const tasks = [];
+      for (let job; (job = store.next()); store.complete(job.id))
+        tasks.push(job.task);
+      return tasks;
+    };
+    drain();
+    await engine.scan();
+    await engine.scan();
+    expect(drain().filter((t) => t.type === "state")).toEqual([task]);
+    await engine.run(task);
+    expect(api.gh[0].state).toBe("closed");
+    expect(store.health().blocked).toBe(0);
+    await engine.scan();
+    expect(drain().filter((t) => t.type === "state")).toEqual([]);
   });
   it("recovers signed user-authored relays without duplicating or echoing them", async () => {
     const { engine, api, store } = setup();
@@ -738,5 +761,132 @@ describe("title and tag reconcile", () => {
     api.gh[0].state = "open";
     await engine.github(issue.number);
     expect(meta.archived).toBe(false);
+  });
+});
+
+describe("close tags", () => {
+  const close: CloseTag[] = [
+    { id: "c-fixed", name: "Fixed", reason: "completed" },
+    { id: "c-wontfix", name: "Won't Fix", reason: "not_planned" },
+  ];
+  async function linked(options: EngineOptions) {
+    const ctx = setup(options);
+    ctx.api.close = close;
+    const issue = ctx.api.addIssue({ title: "Train stuck" });
+    await ctx.engine.github(issue.number);
+    const thread = ctx.store.link(issue.number)!.thread;
+    return { ...ctx, issue, thread, meta: ctx.api.meta.get(thread)! };
+  }
+  it("closes on GitHub when a close tag is applied, archives the thread, and stays quiet afterwards", async () => {
+    const { engine, api, issue, meta, store } = await linked({
+      discordWrites: true,
+    });
+    meta.tags = ["c-wontfix"];
+    await engine.github(issue.number);
+    expect(api.updateIssue).toHaveBeenCalledWith(
+      issue.number,
+      expect.objectContaining({ state: "closed", reason: "not_planned" }),
+    );
+    expect(api.gh[0]).toMatchObject({
+      state: "closed",
+      stateReason: "not_planned",
+    });
+    expect(meta).toMatchObject({ archived: true, tags: ["c-wontfix"] });
+    expect(store.link(issue.number)!.snap).toMatchObject({
+      state: "closed",
+      closed: "c-wontfix",
+    });
+    // The GitHub "closed" event comes back: nothing more to write.
+    api.updateIssue.mockClear();
+    await engine.github(issue.number);
+    expect(api.updateIssue).not.toHaveBeenCalled();
+    expect(api.state).not.toHaveBeenCalled();
+  });
+  it("reopens on GitHub when the close tag is removed, and unarchives", async () => {
+    const { engine, api, issue, meta } = await linked({ discordWrites: true });
+    meta.tags = ["c-fixed"];
+    await engine.github(issue.number);
+    expect(meta.archived).toBe(true);
+    meta.tags = [];
+    await engine.github(issue.number);
+    expect(api.gh[0]).toMatchObject({
+      state: "open",
+      stateReason: "reopened",
+    });
+    expect(meta.archived).toBe(false);
+  });
+  it("mirrors GitHub closes and reopens as tags", async () => {
+    const { engine, api, issue, meta } = await linked({ discordWrites: true });
+    Object.assign(api.gh[0], { state: "closed", stateReason: "completed" });
+    await engine.github(issue.number);
+    expect(meta).toMatchObject({ tags: ["c-fixed"], archived: true });
+    Object.assign(api.gh[0], { state: "open", stateReason: "reopened" });
+    await engine.github(issue.number);
+    expect(meta).toMatchObject({ tags: [], archived: false });
+    expect(api.updateIssue).not.toHaveBeenCalled();
+  });
+  it("an inactivity archive never closes the issue", async () => {
+    const { engine, api, issue, meta } = await linked({ discordWrites: true });
+    meta.archived = true;
+    await engine.github(issue.number);
+    expect(api.gh[0].state).toBe("open");
+    expect(api.updateIssue).not.toHaveBeenCalled();
+    expect(meta.archived).toBe(true);
+  });
+  it("/issue close still works and shows the close tag", async () => {
+    const { engine, api, issue, meta } = await linked({ discordWrites: true });
+    api.state.mockImplementationOnce(async (number: number) => {
+      Object.assign(
+        api.gh.find((i) => i.number === number)!,
+        {
+          state: "closed",
+          stateReason: "completed",
+        },
+      );
+    });
+    await engine.run({ type: "state", issue: issue.number, state: "closed" });
+    expect(meta).toMatchObject({ tags: ["c-fixed"], archived: true });
+    expect(api.updateIssue).not.toHaveBeenCalled();
+  });
+  it("reverts close tags in user mode", async () => {
+    const { engine, api, issue, meta } = await linked({});
+    meta.tags = ["c-fixed"];
+    await engine.github(issue.number);
+    expect(api.gh[0].state).toBe("open");
+    expect(meta.tags).toEqual([]);
+  });
+  it("closes a backfilled post that already carries a close tag after creating its issue", async () => {
+    const { store, api } = setup();
+    const engine = new Engine(store, api, true, { discordWrites: true });
+    api.close = close;
+    const post = api.addPost();
+    api.meta.get(post.id)!.tags = ["c-fixed"];
+    await engine.discord(post.id);
+    const number = store.thread(post.id)!.issue;
+    await engine.github(number);
+    expect(api.gh[0]).toMatchObject({
+      state: "closed",
+      stateReason: "completed",
+    });
+    expect(api.meta.get(post.id)).toMatchObject({
+      tags: ["c-fixed"],
+      archived: true,
+    });
+  });
+  it("a refused close is held and leaves the tag in place for the next scan", async () => {
+    const { engine, api, issue, meta, store } = await linked({
+      discordWrites: true,
+    });
+    meta.tags = ["c-fixed"];
+    api.updateIssue.mockRejectedValueOnce(
+      new WriteBlocked(undefined, "permission", "no access"),
+    );
+    await engine.github(issue.number);
+    expect(api.gh[0].state).toBe("open");
+    expect(meta).toMatchObject({ tags: ["c-fixed"], archived: false });
+    expect(store.health()).toMatchObject({ blocked: 1, failed: 0 });
+    await engine.github(issue.number);
+    expect(api.gh[0].state).toBe("closed");
+    expect(store.health().blocked).toBe(0);
   });
 });

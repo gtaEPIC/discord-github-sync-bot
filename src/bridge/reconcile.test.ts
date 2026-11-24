@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CloseTag,
   ManagedTag,
   MetadataInput,
   managedTags,
@@ -218,5 +219,178 @@ describe("managed tag pairing", () => {
       { id: "1", name: "Bug", label: "bug" },
       { id: "2", name: "Feature", label: "enhancement" },
     ]);
+  });
+});
+
+describe("close tags", () => {
+  const closeTags: CloseTag[] = [
+    { id: "c-fixed", name: "Fixed", reason: "completed" },
+    { id: "c-wontfix", name: "Won't Fix", reason: "not_planned" },
+    { id: "c-dupe", name: "Duplicate", reason: "duplicate" },
+  ];
+  const open = {
+    title: "Train stuck",
+    labels: ["bug"],
+    state: "open" as const,
+  };
+  const closedAs = (reason: string | null) => ({
+    ...open,
+    state: "closed" as const,
+    reason,
+  });
+  const snap = (closed: string | null, extra = {}) => ({
+    title: "Train stuck",
+    labels: ["bug"],
+    closed,
+    ...extra,
+  });
+  const tags = (...extra: string[]) => ({
+    name: "#7 Train stuck",
+    tags: ["t-bug", ...extra],
+  });
+  const close = (overrides: Partial<MetadataInput>) =>
+    plan({ closeTags, github: open, snap: snap(null), ...overrides });
+
+  it("closes the issue with the tag's reason when a close tag is applied on Discord", () => {
+    for (const [tag, reason] of [
+      ["c-fixed", "completed"],
+      ["c-wontfix", "not_planned"],
+      ["c-dupe", "duplicate"],
+    ]) {
+      const result = close({ discord: tags(tag) });
+      expect(result.github).toMatchObject({ state: "closed", reason });
+      expect(result.closed).toBe(tag);
+      expect(result.discord.removeTags).toEqual([]);
+    }
+  });
+  it("reopens the issue when every close tag is removed", () => {
+    const result = close({
+      github: closedAs("completed"),
+      discord: tags(),
+      snap: snap("c-fixed"),
+    });
+    expect(result.github).toMatchObject({ state: "open" });
+    expect(result.closed).toBeNull();
+  });
+  it("shows GitHub closes and reopens as tags", () => {
+    expect(
+      close({ github: closedAs("not_planned"), discord: tags() }).discord
+        .addTags,
+    ).toEqual(["c-wontfix"]);
+    const reopened = close({
+      github: open,
+      discord: tags("c-fixed"),
+      snap: snap("c-fixed"),
+    });
+    expect(reopened.discord.removeTags).toEqual(["c-fixed"]);
+    expect(reopened.github.state).toBeUndefined();
+  });
+  it("falls back to the first close tag for an unmapped reason without rewriting the reason", () => {
+    const withoutDupe = closeTags.slice(0, 2);
+    const first = close({
+      closeTags: withoutDupe,
+      github: closedAs("duplicate"),
+      discord: tags(),
+    });
+    expect(first.discord.addTags).toEqual(["c-fixed"]);
+    expect(first.github.state).toBeUndefined();
+    // Next run: the fallback tag is agreed, so nothing changes on either side.
+    const second = close({
+      closeTags: withoutDupe,
+      github: closedAs("duplicate"),
+      discord: tags("c-fixed"),
+      snap: snap("c-fixed"),
+    });
+    expect(second.github).toMatchObject({ addLabels: [], removeLabels: [] });
+    expect(second.github.state).toBeUndefined();
+    expect(second.discord).toMatchObject({ addTags: [], removeTags: [] });
+    // A null reason (closed before reasons existed) falls back the same way.
+    expect(
+      close({ github: closedAs(null), discord: tags() }).discord.addTags,
+    ).toEqual(["c-fixed"]);
+  });
+  it("switching close tags on Discord changes the reason; the newly added tag replaces the old one", () => {
+    const result = close({
+      github: closedAs("completed"),
+      discord: tags("c-fixed", "c-wontfix"),
+      snap: snap("c-fixed"),
+    });
+    expect(result.github).toMatchObject({
+      state: "closed",
+      reason: "not_planned",
+    });
+    expect(result.discord.removeTags).toEqual(["c-fixed"]);
+  });
+  it("lets GitHub win when both sides changed the state", () => {
+    const result = close({
+      github: closedAs("not_planned"),
+      discord: tags("c-fixed"),
+    });
+    expect(result.github.state).toBeUndefined();
+    expect(result.closed).toBe("c-wontfix");
+    expect(result.discord).toMatchObject({
+      addTags: ["c-wontfix"],
+      removeTags: ["c-fixed"],
+    });
+  });
+  it("reverts close tags in user mode and without a close snapshot", () => {
+    for (const overrides of [
+      { discordWrites: false },
+      { snap: { title: "Train stuck", labels: ["bug"] } },
+    ]) {
+      const result = close({ discord: tags("c-fixed"), ...overrides });
+      expect(result.github.state).toBeUndefined();
+      expect(result.discord.removeTags).toEqual(["c-fixed"]);
+    }
+  });
+  it("never treats close tags as labels, even when a label has the same name", () => {
+    const result = close({
+      managed: [
+        ...managed,
+        { id: "c-dupe", name: "Duplicate", label: "duplicate" },
+      ],
+      github: { ...open, labels: ["bug", "duplicate"] },
+      discord: tags(),
+    });
+    expect(result.discord.addTags).toEqual([]);
+    expect(result.labels).toEqual(["bug"]);
+  });
+  it("gives the close tag a slot over label tags, keeping the label as overflow", () => {
+    const result = close({
+      github: { ...closedAs("completed"), labels: ["bug", "crash", "ui"] },
+      discord: {
+        name: "#7 Train stuck",
+        tags: ["u1", "u2", "t-bug", "t-crash", "t-ui"],
+      },
+      snap: snap(null, { labels: ["bug", "crash", "ui"] }),
+    });
+    expect(result.discord.addTags).toEqual(["c-fixed"]);
+    expect(result.discord.removeTags).toEqual(["t-ui"]);
+    expect(result.overflow).toEqual(["ui"]);
+    expect(result.github).toMatchObject({ addLabels: [], removeLabels: [] });
+    expect(result.github.state).toBeUndefined();
+  });
+  it("does not read a close tag that never fit as a reopen", () => {
+    const full = {
+      name: "#7 Train stuck",
+      tags: ["u1", "u2", "u3", "u4", "u5"],
+    };
+    const first = close({
+      github: { ...closedAs("completed"), labels: [] },
+      discord: full,
+      snap: snap(null, { labels: [] }),
+    });
+    expect(first.closedHidden).toBe(true);
+    const second = close({
+      github: { ...closedAs("completed"), labels: [] },
+      discord: full,
+      snap: snap(first.closed!, { labels: [], closedHidden: true }),
+    });
+    expect(second.github.state).toBeUndefined();
+  });
+  it("ignores the close field entirely when no close tags are configured", () => {
+    const result = plan({ github: closedAs("completed") });
+    expect(result.closed).toBeUndefined();
+    expect(result.github.state).toBeUndefined();
   });
 });

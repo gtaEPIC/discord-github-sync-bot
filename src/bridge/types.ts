@@ -1,5 +1,6 @@
 import { Relay, Writer } from "./authorship";
-import { ManagedTag, Snapshot } from "./reconcile";
+import { CloseTag, ManagedTag, Snapshot } from "./reconcile";
+import { CloseReason } from "./config";
 export interface Issue {
   number: number;
   title: string;
@@ -7,6 +8,8 @@ export interface Issue {
   url: string;
   author: string;
   state: "open" | "closed";
+  /** GitHub `state_reason`: completed, not_planned, duplicate, reopened or null. */
+  stateReason?: string | null;
   labels: string[];
   locked: boolean;
   createdAt: string;
@@ -71,6 +74,8 @@ export interface IssueChange {
   title?: string;
   addLabels?: string[];
   removeLabels?: string[];
+  state?: "open" | "closed";
+  reason?: CloseReason;
 }
 export interface Mirror {
   key: string;
@@ -120,6 +125,8 @@ export interface Platforms {
   createPost(issue: Issue): Promise<Post>;
   /** Forum tags paired with repository labels. */
   managedTags(): Promise<ManagedTag[]>;
+  /** Configured close tags that exist in the forum. */
+  closeTags(): Promise<CloseTag[]>;
   threadMeta(thread: string): Promise<ThreadMeta>;
   /**
    * Apply only the given changes, as a delta against the thread's current tags.
@@ -135,7 +142,7 @@ export interface Platforms {
     closed: boolean,
     reopened: boolean,
   ): Promise<void>;
-  /** Discord-originated title/label change, written by the GitHub App (bridge mode only). */
+  /** Discord-originated title/label/state change, written by the GitHub App (bridge mode only). */
   updateIssue(number: number, change: IssueChange): Promise<void>;
   messages(thread: string): Promise<Message[]>;
   send(thread: string, body: string, nonce: string): Promise<string>;

@@ -37,17 +37,21 @@ export class Engine {
       case "state": {
         const link = this.store.link(task.issue);
         if (!link || link.disabled) return;
+        const key = `state:${task.issue}`;
         try {
           if (task.actor)
             await this.api.state(task.issue, task.state, task.actor);
           else await this.api.state(task.issue, task.state);
-          this.store.unblock(`state:${task.issue}`);
+          this.settleState(task.issue);
           return this.github(task.issue);
         } catch (error) {
-          await this.hold(error, `state:${task.issue}`, undefined, link.thread);
+          // A refused command is kept and retried by every scan; a failed job would be lost.
+          if (await this.hold(error, key, undefined, link.thread)) {
+            this.store.setMeta(`held:${key}`, JSON.stringify(task));
+            return;
+          }
           throw error;
         }
-        return;
       }
       case "unlink": {
         this.store.clearBlocked(task.thread);
@@ -63,6 +67,9 @@ export class Engine {
     const checkpoint = new Date(Date.now() - 60_000).toISOString();
     const since =
       this.store.meta("githubScan") ?? (this.backfill ? undefined : started);
+    // Retry held /issue close|reopen commands; the meta key dedupes them across scans.
+    for (const [key, task] of this.store.metaEntries("held:state:"))
+      this.store.enqueue(JSON.parse(task) as Task, key);
     const issues = await this.api.issues(since);
     for (const issue of issues) {
       if (
@@ -213,23 +220,36 @@ export class Engine {
     }
   }
 
+  /** A state change reached GitHub: an older held command must not undo it later. */
+  private settleState(issue: number) {
+    this.store.unblock(`state:${issue}`);
+    this.store.deleteMeta(`held:state:${issue}`);
+  }
+
   /**
-   * Three-way reconcile of title and managed labels (see reconcile.ts). Both sides are read
-   * now, so a stale queued task cannot undo a newer edit. GitHub writes that are refused are
-   * held under `meta:N`; they never fail the job (a failed job would block later scans).
+   * Three-way reconcile of title, managed labels and close tags (see reconcile.ts). Both
+   * sides are read now, so a stale queued task cannot undo a newer edit. GitHub writes that
+   * are refused are held under `meta:N`; they never fail the job (a failed job would block
+   * later scans).
    */
   private async metadata(link: Link, issue: Issue) {
     const previous = link.snap;
-    const reopened = previous?.state === "closed" && issue.state === "open";
-    const [meta, managed] = await Promise.all([
+    const [meta, managed, closeTags] = await Promise.all([
       this.api.threadMeta(link.thread),
       this.api.managedTags(),
+      this.api.closeTags(),
     ]);
     const plan = planMetadata({
       number: issue.number,
-      github: { title: issue.title, labels: issue.labels },
+      github: {
+        title: issue.title,
+        labels: issue.labels,
+        state: issue.state,
+        reason: issue.stateReason,
+      },
       discord: { name: meta.name, tags: meta.tags },
       managed,
+      closeTags,
       snap: previous,
       discordWrites: Boolean(this.options.discordWrites),
     });
@@ -238,17 +258,27 @@ export class Engine {
     if (
       github.title !== undefined ||
       github.addLabels.length ||
-      github.removeLabels.length
+      github.removeLabels.length ||
+      github.state
     ) {
       try {
         await this.api.updateIssue(issue.number, github);
       } catch (error) {
         // Leave Discord and the snapshot as they are, so the change is retried on the next scan.
         if (await this.hold(error, key, undefined, link.thread))
-          return { reopened };
+          return {
+            reopened: previous?.state === "closed" && issue.state === "open",
+          };
         throw error;
       }
+      if (github.state) {
+        this.settleState(issue.number);
+        issue.state = github.state;
+        issue.stateReason =
+          github.state === "closed" ? github.reason : "reopened";
+      }
     }
+    const reopened = previous?.state === "closed" && issue.state === "open";
     this.store.unblock(key);
     const applied = await this.api.applyMeta(link.thread, {
       name: plan.discord.name,
@@ -262,7 +292,9 @@ export class Engine {
       ...github.addLabels,
     ];
     const overflow = new Set(plan.overflow);
+    let closedHidden = plan.closedHidden;
     for (const id of applied.overflow) {
+      if (id === plan.closed) closedHidden = true;
       const label = managed.find((m) => m.id === id)?.label;
       if (label) overflow.add(label);
     }
@@ -275,6 +307,8 @@ export class Engine {
       labels: plan.labels,
       overflow: [...overflow],
       state: issue.state,
+      closed: plan.closed,
+      closedHidden,
     };
     this.store.saveLink(link);
     return { reopened };
@@ -410,6 +444,15 @@ export class Engine {
         origin: "discord",
         writer: issue.writer ?? issue.relay?.writer,
       };
+      // The new issue matches the post: seed the snapshot so tags already on the post
+      // (a close tag on a backfilled post, say) count as Discord's side, not as stale.
+      if (!existing && issue.state === "open")
+        link.snap = {
+          title: issue.title,
+          labels: issue.labels,
+          state: "open",
+          closed: (await this.api.closeTags()).length ? null : undefined,
+        };
       this.store.saveLink(link);
     }
     if (link.origin === "discord") {

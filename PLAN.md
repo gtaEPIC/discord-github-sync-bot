@@ -124,7 +124,7 @@ Each phase ends with typecheck, tests, build, docker build and smoke green, then
 - Acceptance: a Discord user with no linked GitHub account can open a post, reply, and edit; issue and comments appear with Discord attribution; no echo loops.
 
 ### Phase 2: Titles and tags/labels (D3)
-- [x] `Link.snap` (title, managed labels, overflow, state) and pure `planMetadata` in `src/bridge/reconcile.ts`. It runs once, in `engine.github()` (`metadata()`), which every Discord task already ends in; both sides are read at run time. A missing snapshot means GitHub wins once, so links need no seeding (a Discord-origin issue is created with the same tag-to-label pairing, so both sides start equal).
+- [x] `Link.snap` (title, managed labels, overflow, state) and pure `planMetadata` in `src/bridge/reconcile.ts`. It runs once, in `engine.github()` (`metadata()`), which every Discord task already ends in; both sides are read at run time. A missing snapshot means GitHub wins once. (Phase 3 added seeding for Discord-origin issues, needed for close tags.)
 - [x] `ThreadUpdate` listener enqueues the linked issue's `github` task when the name or applied tags change.
 - [x] `Platforms.updateIssue` (App write token, bridge mode only; refusals are held under `meta:N` and never fail the job), `threadMeta`, `managedTags`, `applyMeta` (forced re-read, delta, only changed fields, archived state restored), `applyArchive` (archive on close, unarchive only on reopen vs the snapshot). `updatePost` is gone.
 - [x] Title: only this issue's `#N ` prefix is stripped; names truncated to 100 compare equal. Managed pairing: explicit `labels` setting, else case-insensitive name; unmanaged tags pass through. Five-tag cap: tags already applied are kept, labels that do not fit are kept as `overflow` and not read as removals. No warning message in the thread (decided against: it would add bot noise on every overflow). Renames: at most two per thread per ten minutes; a deferred rename keeps the old snapshot title so it is retried.
@@ -132,10 +132,12 @@ Each phase ends with typecheck, tests, build, docker build and smoke green, then
 - Acceptance: rename a thread -> issue title changes; add/remove a managed tag -> label changes; same in reverse; simultaneous edits resolve with GitHub winning.
 
 ### Phase 3: Close tags (D5)
-- [ ] `state_reason` on `Issue`; `Platforms.state(number, state, actor, reason)`.
-- [ ] Config `closeTags`; tag add/remove -> `state` task; GitHub close/reopen -> add/remove the tag.
-- [ ] Keep `/issue close|reopen` working.
-- [ ] Tests: Fixed -> closed/completed; Won't Fix -> closed/not_planned; reopen removes tags; GitHub-side close applies the right tag.
+- [x] `Issue.stateReason`; `IssueChange.state/reason` written by `updateIssue` in one `issues.update` (reopen sends `state_reason: reopened`). The close field runs inside the same `metadata()` reconcile instead of a separate `state` task, so it shares the snapshot, the hold-and-retry and the echo safety.
+- [x] Config `closeTags: [{tag, reason}]` (reason `completed | not_planned | duplicate`, up to 10, no duplicate names). Close tags are resolved by name (case-insensitive) and never paired as labels, even where a label has the same name (GitHub's default `duplicate`).
+- [x] Closed field in tag space (`Snapshot.closed`, tag id or null): GitHub's reason maps to a tag with that reason, preferring the agreed one, else the first close tag, so a fallback never rewrites `state_reason`. A newly added second close tag replaces the old one. Removing all close tags reopens. A close tag outranks label tags for the five slots (the displaced label stays on GitHub as overflow); a close tag that cannot be shown at all is flagged `closedHidden` so its absence is not read as a reopen. User mode and links without a close snapshot: GitHub wins.
+- [x] A Discord-origin issue seeds `link.snap` at creation, so a backfilled post that already carries a close tag is created, then closed with that reason.
+- [x] Keep `/issue close|reopen` working (shows the tag afterwards). Rule 1: a refused `state` command is held, saved as `held:state:N` in `meta` and re-enqueued (deduplicated) by every scan instead of failing the job; any later successful state change clears it.
+- [x] Tests: reconcile (each reason, reopen, GitHub side, fallback without rewrite, null reason, switching tags, conflicts, user mode, label-name clash, slot priority, hidden close tag), engine (close archives and is quiet after the echo, reopen unarchives, GitHub mirrors, inactivity archive never closes, `/issue close`, user mode reverts, backfilled close tag, held close retried), adapter (`state_reason`, tag resolution), config validation. 179 tests.
 - Acceptance: Fixed tag closes the issue and archives the thread; reopening on GitHub removes the tag.
 
 ### Phase 4: Projects v2 status (D6, D7)

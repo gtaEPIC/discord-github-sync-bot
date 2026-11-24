@@ -5,6 +5,13 @@
  * rejected so typos fail loudly instead of being ignored.
  */
 export type WriteMode = "user" | "bridge";
+/** GitHub `state_reason` values a forum tag can close an issue with. */
+export type CloseReason = "completed" | "not_planned" | "duplicate";
+export const CLOSE_REASONS: CloseReason[] = [
+  "completed",
+  "not_planned",
+  "duplicate",
+];
 
 export interface BridgeConfig {
   /** `user`: each Discord author must link GitHub (upstream). `bridge`: the GitHub App bot writes with Discord attribution. */
@@ -19,6 +26,12 @@ export interface BridgeConfig {
    * label are left alone.
    */
   labels: Record<string, string>;
+  /**
+   * Forum tags that mean "closed", each with the GitHub close reason it stands for. Applying
+   * one closes the issue (bridge mode); removing every close tag reopens it. The first tag is
+   * shown when GitHub's reason has no tag of its own. Make these tags moderated in Discord.
+   */
+  closeTags: { tag: string; reason: CloseReason }[];
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = Object.freeze({
@@ -26,6 +39,7 @@ export const DEFAULT_CONFIG: BridgeConfig = Object.freeze({
   allowRoles: [],
   rateLimit: Object.freeze({ issuesPerHour: 5, commentsPerHour: 60 }),
   labels: Object.freeze({}),
+  closeTags: [],
 }) as BridgeConfig;
 
 export class ConfigError extends Error {
@@ -35,7 +49,7 @@ export class ConfigError extends Error {
   }
 }
 
-const KEYS = ["writeMode", "allowRoles", "rateLimit", "labels"];
+const KEYS = ["writeMode", "allowRoles", "rateLimit", "labels", "closeTags"];
 const RATE_KEYS = ["issuesPerHour", "commentsPerHour"];
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -112,6 +126,38 @@ export function parseBridgeConfig(value: unknown): Partial<BridgeConfig> {
       );
     else result.labels = Object.fromEntries(entries) as Record<string, string>;
   }
+  if (value.closeTags !== undefined) {
+    const list = value.closeTags;
+    const names = Array.isArray(list)
+      ? list.map((t) =>
+          isObject(t) && typeof t.tag === "string"
+            ? t.tag.trim().toLowerCase()
+            : "",
+        )
+      : [];
+    if (
+      !Array.isArray(list) ||
+      list.length > 10 ||
+      list.some(
+        (t) =>
+          !isObject(t) ||
+          Object.keys(t).some((k) => k !== "tag" && k !== "reason") ||
+          typeof t.tag !== "string" ||
+          !t.tag.trim() ||
+          t.tag.length > 20 ||
+          !CLOSE_REASONS.includes(t.reason as CloseReason),
+      )
+    )
+      problems.push(
+        `closeTags must be a list of up to 10 { "tag": forum tag name (max 20 characters), "reason": ${CLOSE_REASONS.map((r) => `"${r}"`).join(" | ")} }.`,
+      );
+    else if (new Set(names).size !== names.length)
+      problems.push("closeTags lists the same tag twice.");
+    else
+      result.closeTags = (list as { tag: string; reason: CloseReason }[]).map(
+        ({ tag, reason }) => ({ tag, reason }),
+      );
+  }
   if (problems.length) throw new ConfigError(problems);
   return result;
 }
@@ -129,5 +175,6 @@ export function resolveConfig(stored: unknown): BridgeConfig {
     allowRoles: parsed.allowRoles ?? [],
     rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...parsed.rateLimit },
     labels: parsed.labels ?? {},
+    closeTags: parsed.closeTags ?? [],
   };
 }

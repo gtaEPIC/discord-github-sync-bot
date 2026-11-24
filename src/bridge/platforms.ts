@@ -20,7 +20,13 @@ import {
   ThreadMeta,
 } from "./types";
 import { BridgeConfig, DEFAULT_CONFIG } from "./config";
-import { MAX_TAGS, ManagedTag, managedTags, threadName } from "./reconcile";
+import {
+  CloseTag,
+  MAX_TAGS,
+  ManagedTag,
+  managedTags,
+  threadName,
+} from "./reconcile";
 
 type Options = {
   owner: string;
@@ -135,6 +141,7 @@ export class LivePlatforms implements Platforms {
     html_url: string;
     user: { login: string; id?: number } | null;
     state: string;
+    state_reason?: string | null;
     labels: (string | { name?: string })[];
     locked: boolean;
     created_at: string;
@@ -153,6 +160,7 @@ export class LivePlatforms implements Platforms {
       ),
       own: this.ownAuthor(data.user?.id),
       state: data.state === "closed" ? "closed" : "open",
+      stateReason: data.state_reason ?? null,
       labels: data.labels
         .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
         .filter(Boolean),
@@ -363,11 +371,18 @@ export class LivePlatforms implements Platforms {
       request: { timeout: 30_000 },
     });
     try {
-      if (change.title !== undefined)
+      if (change.title !== undefined || change.state)
         await api.issues.update({
           ...this.repo,
           issue_number: number,
           title: change.title,
+          state: change.state,
+          // GitHub accepts "duplicate"; the bundled Octokit types predate it.
+          state_reason: (change.state === "closed"
+            ? change.reason
+            : change.state === "open"
+              ? "reopened"
+              : undefined) as "completed" | "not_planned" | "reopened",
         });
       if (change.addLabels?.length)
         await api.issues.addLabels({
@@ -404,14 +419,27 @@ export class LivePlatforms implements Platforms {
     return names;
   }
   async managedTags(): Promise<ManagedTag[]> {
+    const close = new Set(
+      this.config.closeTags.map((t) => t.tag.toLowerCase()),
+    );
     return managedTags(
-      (this.forum?.availableTags ?? []).map((t) => ({
-        id: t.id,
-        name: t.name,
-      })),
+      (this.forum?.availableTags ?? [])
+        .filter((t) => !close.has(t.name.toLowerCase()))
+        .map((t) => ({ id: t.id, name: t.name })),
       await this.repoLabels(),
       this.config.labels,
     );
+  }
+  async closeTags(): Promise<CloseTag[]> {
+    const available = this.forum?.availableTags ?? [];
+    const result: CloseTag[] = [];
+    for (const { tag, reason } of this.config.closeTags) {
+      const found = available.find(
+        (t) => t.name.toLowerCase() === tag.toLowerCase(),
+      );
+      if (found) result.push({ id: found.id, name: found.name, reason });
+    }
+    return result;
   }
   private async memberRoles(discordId: string): Promise<string[]> {
     const cached = this.roleCache.get(discordId);

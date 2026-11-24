@@ -55,6 +55,26 @@ describe("bridge settings", () => {
     expect(() => parseBridgeConfig({ labels: ["bug"] })).toThrow(ConfigError);
     expect(resolveConfig({}).labels).toEqual({});
   });
+  it("validates close tags", () => {
+    const closeTags = [
+      { tag: "Fixed", reason: "completed" },
+      { tag: "Won't Fix", reason: "not_planned" },
+    ];
+    expect(parseBridgeConfig({ closeTags })).toEqual({ closeTags });
+    expect(resolveConfig({}).closeTags).toEqual([]);
+    for (const bad of [
+      [{ tag: "Fixed", reason: "done" }],
+      [{ tag: "Fixed" }],
+      [{ tag: "", reason: "completed" }],
+      [{ tag: "Fixed", reason: "completed", extra: 1 }],
+      [
+        { tag: "Fixed", reason: "completed" },
+        { tag: "fixed", reason: "not_planned" },
+      ],
+      { Fixed: "completed" },
+    ])
+      expect(() => parseBridgeConfig({ closeTags: bad })).toThrow(ConfigError);
+  });
   it("never resolves corrupt stored settings to bridge mode", () => {
     expect(resolveConfig({ writeMode: "bridge", typo: true }).writeMode).toBe(
       "user",
