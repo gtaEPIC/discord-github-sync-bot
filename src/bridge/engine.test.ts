@@ -244,6 +244,74 @@ describe("durable bridge", () => {
     expect(store.mirror(`github:${comment.id}`)).toBeUndefined();
     expect(api.createPost).not.toHaveBeenCalled();
   });
+  it("loops bridge-written posts, replies, edits and deletions without echoes when only the relay identifies them", async () => {
+    const { engine, api, store } = setup();
+    const bridge = (discordId: string) => ({
+      kind: "bridge" as const,
+      discordId,
+      githubId: "999",
+    });
+    // Production shape: GitHub content is never `own`; only the verified relay marks it as ours.
+    api.createIssue.mockImplementation(async (post: Post, marker: string) => {
+      const issue = api.addIssue({
+        title: post.title,
+        body: `${post.starter.body}\n${marker}`,
+        own: false,
+        author: "app[bot]",
+        relay: { kind: "thread", sourceId: post.id, writer: bridge("123") },
+      });
+      return { ...structuredClone(issue), writer: bridge("123") };
+    });
+    api.createComment.mockImplementation(
+      async (number: number, body: string, source?: Message) => {
+        const comment = api.addComment(number, body);
+        comment.own = false;
+        comment.relay = {
+          kind: "message",
+          sourceId: source!.id,
+          writer: bridge("123"),
+        };
+        return { id: comment.id, writer: bridge("123") } as never;
+      },
+    );
+    const post = api.addPost({ authorId: "123" });
+    await engine.discord(post.id);
+    const link = store.thread(post.id)!;
+    expect(link).toMatchObject({ origin: "discord", writer: bridge("123") });
+    const reply = api.addMessage(post.id, "a reply");
+    await engine.discord(post.id);
+    await engine.github(link.issue);
+    await engine.discord(post.id);
+    await engine.github(link.issue);
+    expect(api.createIssue).toHaveBeenCalledTimes(1);
+    expect(api.createPost).not.toHaveBeenCalled();
+    expect(api.createComment).toHaveBeenCalledTimes(1);
+    // Nothing GitHub-side was mirrored back into the thread as a new message.
+    expect(
+      store.mirrors(link.issue).filter((m) => m.key.startsWith("github:")),
+    ).toEqual([]);
+    // Edits and deletions reuse the pinned bridge writer.
+    reply.body = "edited reply";
+    await engine.discord(post.id);
+    const mirror = store.mirror(`discord:${reply.id}`)!;
+    expect(api.editComment).toHaveBeenLastCalledWith(
+      mirror.ids[0],
+      expect.stringContaining("edited reply"),
+      bridge("123"),
+      expect.objectContaining({ id: reply.id }),
+    );
+    api.messagesByThread.set(
+      post.id,
+      api.messagesByThread.get(post.id)!.filter((m) => m.id !== reply.id),
+    );
+    await engine.discord(post.id);
+    expect(api.editComment).toHaveBeenLastCalledWith(
+      mirror.ids[0],
+      expect.stringContaining("deleted on Discord"),
+      bridge("123"),
+    );
+    expect(api.createComment).toHaveBeenCalledTimes(1);
+  });
   it("repairs a deleted mirror even when the source content hash has not changed", async () => {
     const { engine, api, store } = setup();
     const issue = api.addIssue();

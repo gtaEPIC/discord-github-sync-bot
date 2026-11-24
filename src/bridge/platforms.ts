@@ -10,6 +10,7 @@ import { Authorship, Writer, WriteBlocked } from "./authorship";
 import { uploadToR2 } from "../r2";
 import { chunks, issueSummary, missing, sourceBody } from "./content";
 import { Comment, Issue, Link, Message, Platforms, Post } from "./types";
+import { BridgeConfig, DEFAULT_CONFIG } from "./config";
 
 type Options = {
   owner: string;
@@ -18,12 +19,29 @@ type Options = {
   readToken: () => Promise<string>;
   repositoryId?: number;
   invalidateReadToken?: () => void;
+  /** Resolved per-mapping settings; defaults to upstream user mode. */
+  config?: BridgeConfig;
+  /** Issues-write installation token, used only for bridge-mode writes. */
+  writeToken?: () => Promise<string>;
+  invalidateWriteToken?: () => void;
+  /** The GitHub App's bot login (`slug[bot]`), the author of bridge-mode writes. */
+  botLogin?: string;
+  /** Mapping start time; older Discord messages are backfill and exempt from the rate limit. */
+  started?: () => string | undefined;
+  /** Discord role IDs of a guild member (injectable for tests). */
+  memberRoles?: (discordId: string) => Promise<string[]>;
 };
+type Rules = { limit?: "issue" | "comment"; roles?: boolean; source?: Message };
+const HOUR = 3600_000;
 
 export class LivePlatforms implements Platforms {
   readonly github: Octokit;
   private forum!: ForumChannel;
   private hostedAttachments = new Map<string, string>();
+  /** Numeric GitHub id of the App bot user; known after initialize() when botLogin is set. */
+  botId?: string;
+  private recent = new Map<string, number[]>();
+  private roleCache = new Map<string, { roles: string[]; until: number }>();
   constructor(
     readonly client: Client,
     readonly options: Options,
@@ -69,6 +87,30 @@ export class LivePlatforms implements Platforms {
       repository.data.id !== this.options.repositoryId
     )
       throw new Error("Repository identity changed. Re-approve this mapping.");
+    // Bridge writes are recognised as our own by their author id, so resolve it before accepting work.
+    if (this.options.botLogin) {
+      try {
+        const { data } = await this.github.users.getByUsername({
+          username: this.options.botLogin,
+        });
+        this.botId = String(data.id);
+      } catch (error) {
+        if (this.bridgeMode) throw error;
+      }
+    }
+    if (this.bridgeMode && (!this.botId || !this.options.writeToken))
+      throw new Error(
+        "Bridge write mode needs the GitHub App slug and an installation with Issues: read and write.",
+      );
+  }
+  private get config() {
+    return this.options.config ?? DEFAULT_CONFIG;
+  }
+  private get bridgeMode() {
+    return this.config.writeMode === "bridge";
+  }
+  private ownAuthor(id: number | undefined) {
+    return this.botId !== undefined && String(id) === this.botId;
   }
   get guildId() {
     return this.forum.guildId;
@@ -99,7 +141,7 @@ export class LivePlatforms implements Platforms {
         String(data.user?.id ?? ""),
         `${this.options.owner}/${this.options.repo}`,
       ),
-      own: false,
+      own: this.ownAuthor(data.user?.id),
       state: data.state === "closed" ? "closed" : "open",
       labels: data.labels
         .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
@@ -190,6 +232,143 @@ export class LivePlatforms implements Platforms {
       throw error;
     }
   }
+  /**
+   * Route a Discord-originated write. A pinned writer keeps the identity the content was
+   * created with; new content follows the mapping's write mode. User mode is upstream's path.
+   */
+  private write<T>(
+    discordId: string | undefined,
+    pinned: Writer | undefined,
+    operation: (api: Octokit, writer: Writer) => Promise<T>,
+    rules: Rules = {},
+  ): Promise<T> {
+    const bridge =
+      pinned?.kind === "bridge" || (pinned?.kind !== "user" && this.bridgeMode);
+    return bridge
+      ? this.bridgeWrite(discordId, pinned, operation, rules)
+      : this.userWrite(discordId, pinned, operation);
+  }
+  private async bridgeWrite<T>(
+    discordId: string | undefined,
+    pinned: Writer | undefined,
+    operation: (api: Octokit, writer: Writer) => Promise<T>,
+    rules: Rules,
+  ): Promise<T> {
+    if (
+      !discordId ||
+      !/^\d+$/.test(discordId) ||
+      (pinned?.discordId && pinned.discordId !== discordId)
+    )
+      throw new WriteBlocked(
+        discordId,
+        "original-author",
+        "Only the original Discord author's changes are sent to GitHub.",
+      );
+    if (!this.botId || !this.options.writeToken)
+      throw new WriteBlocked(
+        discordId,
+        "permission",
+        "Bridge write mode is not ready: the GitHub App bot identity or write access is missing. This change has not been sent.",
+      );
+    const allow = this.config.allowRoles;
+    if (rules.roles && allow.length) {
+      const roles = await this.memberRoles(discordId);
+      if (!roles.some((id) => allow.includes(id)))
+        throw new WriteBlocked(
+          discordId,
+          "role",
+          "Your Discord roles do not allow posting to GitHub. This change stays in Discord.",
+        );
+    }
+    const max =
+      rules.limit === "issue"
+        ? this.config.rateLimit.issuesPerHour
+        : this.config.rateLimit.commentsPerHour;
+    const started = this.options.started?.();
+    const backfill = Boolean(
+      started && rules.source?.createdAt && rules.source.createdAt < started,
+    );
+    const key =
+      rules.limit && max > 0 && !backfill
+        ? `${rules.limit}:${discordId}`
+        : undefined;
+    const recent = key
+      ? (this.recent.get(key) ?? []).filter((t) => t > Date.now() - HOUR)
+      : [];
+    if (key) {
+      this.recent.set(key, recent);
+      if (recent.length >= max)
+        throw new WriteBlocked(
+          discordId,
+          "rate",
+          "You are posting faster than the bridge allows. Your message will be sent to GitHub later.",
+        );
+    }
+    const writer: Writer = { kind: "bridge", discordId, githubId: this.botId };
+    const api = new Octokit({
+      auth: await this.options.writeToken(),
+      request: { timeout: 30_000 },
+    });
+    try {
+      const result = await operation(api, writer);
+      if (key) recent.push(Date.now());
+      return result;
+    } catch (error) {
+      if (error instanceof WriteBlocked) throw error;
+      const failure = error as {
+        status?: number;
+        response?: { headers?: Record<string, string> };
+      };
+      const headers = failure.response?.headers;
+      // Rate limits are retried by the queue with GitHub's delay; they are not permission problems.
+      if (
+        headers?.["retry-after"] ||
+        headers?.["x-ratelimit-remaining"] === "0"
+      )
+        throw error;
+      if (failure.status === 401) {
+        this.options.invalidateWriteToken?.();
+        throw error;
+      }
+      if (failure.status === 403 || failure.status === 404)
+        throw new WriteBlocked(
+          discordId,
+          "permission",
+          "The GitHub App cannot write issues in this repository. Check that it has Issues: read and write and is installed on the repository. This change has not been sent.",
+        );
+      throw error;
+    }
+  }
+  private async memberRoles(discordId: string): Promise<string[]> {
+    const cached = this.roleCache.get(discordId);
+    if (cached && cached.until > Date.now()) return cached.roles;
+    let roles: string[] = [];
+    if (this.options.memberRoles)
+      roles = await this.options.memberRoles(discordId);
+    else
+      try {
+        const member = await this.forum.guild.members.fetch({
+          user: discordId,
+        });
+        roles = [...member.roles.cache.keys()];
+      } catch (error) {
+        // A member who left the server has no roles; other failures are retried.
+        if ((error as { code?: number }).code !== 10007) throw error;
+      }
+    this.roleCache.set(discordId, { roles, until: Date.now() + 10 * 60_000 });
+    return roles;
+  }
+  /** Adopt the actual author id if a bridge create was not authored by the resolved bot id. */
+  private adopt(writer: Writer, authorId: number | undefined): Writer {
+    if (writer.kind !== "bridge" || authorId === undefined) return writer;
+    if (String(authorId) !== writer.githubId) {
+      console.error(
+        "Bridge write author did not match the resolved GitHub App bot id; using the actual author id.",
+      );
+      this.botId = String(authorId);
+    }
+    return { ...writer, githubId: String(authorId) };
+  }
   private signed(
     body: string,
     kind: "thread" | "message",
@@ -204,7 +383,7 @@ export class LivePlatforms implements Platforms {
     return marker ? `${body}\n\n${marker}` : body;
   }
   async createIssue(post: Post, marker: string) {
-    return this.userWrite(
+    return this.write(
       post.starter.authorId,
       undefined,
       async (api, writer) => {
@@ -226,8 +405,12 @@ export class LivePlatforms implements Platforms {
             writer,
           ),
         });
-        return { ...this.issue(data), writer };
+        return {
+          ...this.issue(data),
+          writer: this.adopt(writer, data.user?.id),
+        };
       },
+      { limit: "issue", roles: true, source: post.starter },
     );
   }
   async editIssue(
@@ -236,10 +419,10 @@ export class LivePlatforms implements Platforms {
     writer?: Writer,
     source?: Message,
   ) {
-    await this.userWrite(
+    await this.write(
       source?.authorId ?? writer?.discordId,
       writer,
-      async (api) => {
+      async (api, actual) => {
         await api.issues.update({
           ...this.repo,
           issue_number: number,
@@ -247,14 +430,16 @@ export class LivePlatforms implements Platforms {
             body,
             "thread",
             body.match(/<!-- gd-sync:thread:(\d+) -->/)?.[1],
-            writer,
+            actual.kind === "bridge" ? actual : writer,
           ),
         });
       },
+      { roles: true, source },
     );
   }
   async state(number: number, state: "open" | "closed", actor?: string) {
-    await this.userWrite(actor, undefined, async (api) => {
+    // /issue close|reopen already checked Manage Threads or a manager role: no allow-list or rate limit.
+    await this.write(actor, undefined, async (api) => {
       await api.issues.update({ ...this.repo, issue_number: number, state });
     });
   }
@@ -269,7 +454,7 @@ export class LivePlatforms implements Platforms {
       body: c.body ?? "",
       author: c.user?.login ?? "unknown",
       url: c.html_url,
-      own: false,
+      own: this.ownAuthor(c.user?.id),
       authorId: c.user?.id === undefined ? undefined : String(c.user.id),
       relay: this.authorship?.verify(
         c.body ?? "",
@@ -279,14 +464,22 @@ export class LivePlatforms implements Platforms {
     }));
   }
   async createComment(number: number, body: string, source?: Message) {
-    return this.userWrite(source?.authorId, undefined, async (api, writer) => {
-      const response = await api.issues.createComment({
-        ...this.repo,
-        issue_number: number,
-        body: this.signed(body, "message", source?.id, writer),
-      });
-      return { id: String(response.data.id), writer };
-    });
+    return this.write(
+      source?.authorId,
+      undefined,
+      async (api, writer) => {
+        const response = await api.issues.createComment({
+          ...this.repo,
+          issue_number: number,
+          body: this.signed(body, "message", source?.id, writer),
+        });
+        return {
+          id: String(response.data.id),
+          writer: this.adopt(writer, response.data.user?.id),
+        };
+      },
+      { limit: "comment", roles: true, source },
+    );
   }
   async editComment(
     id: string,
@@ -294,10 +487,10 @@ export class LivePlatforms implements Platforms {
     writer?: Writer,
     source?: Message,
   ) {
-    await this.userWrite(
+    await this.write(
       source?.authorId ?? writer?.discordId,
       writer,
-      async (api) => {
+      async (api, actual) => {
         await api.issues.updateComment({
           ...this.repo,
           comment_id: Number(id),
@@ -305,10 +498,12 @@ export class LivePlatforms implements Platforms {
             body,
             "message",
             body.match(/<!-- gd-sync:message:(\d+) -->/)?.[1],
-            writer,
+            actual.kind === "bridge" ? actual : writer,
           ),
         });
       },
+      // Deletion tombstones have no source message and are always allowed.
+      { roles: Boolean(source), source },
     );
   }
   async notifyBlocked(source: Message, message: string) {

@@ -11,6 +11,7 @@ import {
 } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import type { BridgeConfig } from "../bridge/config";
 
 export interface Mapping {
   id: string;
@@ -25,6 +26,8 @@ export interface Mapping {
   repositoryId?: number;
   guildId?: string;
   createdBy?: string;
+  /** Per-mapping bridge settings, validated by parseBridgeConfig. Absent means upstream behaviour. */
+  bridge?: Partial<BridgeConfig>;
 }
 export class ManagementStore {
   readonly db: DatabaseSync;

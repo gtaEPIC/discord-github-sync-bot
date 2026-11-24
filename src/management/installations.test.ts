@@ -169,6 +169,32 @@ describe("GitHub App installation access", () => {
     );
     expect(api.mock.calls.filter((c) => c[0] === "POST")).toHaveLength(before);
   });
+  it("mints bridge write tokens separately, still pinned to one repository, and invalidates both", async () => {
+    const { service, api } = setup();
+    await service.configure("123", key);
+    const read = await service.repositoryToken("org", "one", 11, 1);
+    const write = await service.repositoryToken("org", "one", 11, 1, "write");
+    expect(write).not.toBe(read);
+    const mint = api.mock.calls.filter((c) => c[0] === "POST");
+    expect(mint.map((c) => c[3])).toEqual([
+      {
+        permissions: { issues: "read", metadata: "read" },
+        repository_ids: [11],
+      },
+      {
+        permissions: { issues: "write", metadata: "read" },
+        repository_ids: [11],
+      },
+    ]);
+    expect(await service.repositoryToken("org", "one", 11, 1, "write")).toBe(
+      write,
+    );
+    service.invalidate("org", "one");
+    expect(
+      await service.repositoryToken("org", "one", 11, 1, "write"),
+    ).not.toBe(write);
+    expect(service.botLogin()).toBe("test-app[bot]");
+  });
   it("discovers only issue-enabled repositories belonging to the selected installation", async () => {
     const { service, api } = setup();
     await service.configure("123", key);

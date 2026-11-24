@@ -117,10 +117,10 @@ Each phase ends with typecheck, tests, build, docker build and smoke green, then
 - [x] Added `.github/workflows/pr-build-check.yml` (PRs to `main`: tests, then a Docker build) and `image-build.yml` (`v*` tags: tests, then push to GHCR), via the `ghcr-docker-workflows` skill. actionlint was not run (not installed).
 
 ### Phase 1: Bridge write mode (D2)
-- [ ] `writeMode` in mapping config; `LivePlatforms` uses the installation token for writes when `bridge`.
-- [ ] Installation token scope: add Issues write for bridge mode only; update README GitHub App permissions.
-- [ ] Echo handling: bridge-authored issues/comments recognised via markers/relay/mirrors. Tests: Discord post -> issue -> no duplicate post; Discord reply -> comment -> no duplicate message; edit and delete paths.
-- [ ] Optional role allow-list and per-user rate limit.
+- [x] `writeMode` in mapping settings (`src/bridge/config.ts`, `Mapping.bridge`, admin `POST /api/mappings/:id/config` and a Settings dialog). `LivePlatforms.write()` routes to `bridgeWrite` (bridge mode or a pinned bridge writer) or upstream `userWrite`.
+- [x] Write tokens: `repositoryToken(..., "write")` mints `{issues: "write", metadata: "read"}` pinned to the repository, cached under the same `repo:` prefix. Read tokens unchanged. README documents bridge mode.
+- [x] Echo handling: the bot id is resolved in `initialize()` (`users.getByUsername(slug[bot])`) and the mapping fails if it cannot be resolved in bridge mode. Relays are signed `{kind:"bridge", discordId, githubId: botId}`; `own` is set for bot-authored content; a mismatched author id on create is adopted. Loop test in `engine.test.ts` (`own: false`, relay only) covers post, reply, edit and delete.
+- [x] Role allow-list (`allowRoles`; role refusals are held without a ping) and per-user rate limit (`rateLimit`, in-memory, backfill exempt, failures not counted). GitHub rate-limit 403s are rethrown for queue backoff; a 401 refreshes the write token. Tests in `bridgeWrites.test.ts`. Live acceptance waits for Phase 6 staging.
 - Acceptance: a Discord user with no linked GitHub account can open a post, reply, and edit; issue and comments appear with Discord attribution; no echo loops.
 
 ### Phase 2: Titles and tags/labels (D3)

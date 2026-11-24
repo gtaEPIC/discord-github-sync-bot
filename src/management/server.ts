@@ -12,6 +12,7 @@ import { html, userHtml, css, js } from "./ui";
 
 import { GitHubInstallations } from "./installations";
 import { GitHubAccounts } from "./accounts";
+import { ConfigError, parseBridgeConfig } from "../bridge/config";
 
 class PublicError extends Error {
   constructor(
@@ -736,6 +737,28 @@ export function createManagementServer(
       );
       void runtime.reload();
       res.json({ ok: true });
+    }),
+  );
+  app.post(
+    "/api/mappings/:id/config",
+    action((req, res) => {
+      const mapping = store.mapping(String(req.params.id));
+      if (!mapping) throw new PublicError("Mapping not found.", 404);
+      let bridge;
+      try {
+        bridge = parseBridgeConfig(req.body.config);
+      } catch (error) {
+        if (error instanceof ConfigError) throw new PublicError(error.message);
+        throw error;
+      }
+      store.saveMapping({ ...mapping, bridge });
+      store.audit(
+        "admin",
+        `updated bridge settings (${bridge.writeMode ?? "user"} mode)`,
+        mapping,
+      );
+      void runtime.reload();
+      res.json({ ok: true, bridge });
     }),
   );
   for (const task of ["scan", "retry"] as const)

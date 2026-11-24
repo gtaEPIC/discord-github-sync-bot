@@ -62,6 +62,22 @@ Each member runs `/github link`, opens the private single-use URL, clicks **Cont
 
 Writes appear as the actual GitHub user (with GitHub’s app attribution).
 
+### Bridge write mode (fork addition, opt-in per mapping)
+
+For a public forum where reporters will not link GitHub, open **Admin → Mappings → Settings** and save:
+
+```json
+{ "writeMode": "bridge", "allowRoles": [], "rateLimit": { "issuesPerHour": 5, "commentsPerHour": 60 } }
+```
+
+- Discord → GitHub writes (new issues, comments, edits, deletion tombstones, `/issue close|reopen`) then use a GitHub App installation token minted with **Issues: write** for that one repository. They appear as the App's bot user, with a `**Name** on Discord` header and a signed relay marker. Nobody needs to link GitHub, and `/issue close|reopen` checks only Manage Threads or a manager role.
+- `allowRoles`: Discord role IDs whose members may write to GitHub. Empty means anyone who can post in the forum. Other members' posts stay in Discord (held, no notice).
+- `rateLimit`: new issues and new comments per Discord user per rolling hour (`0` turns a limit off). Over-limit writes are held and sent on a later scan. Backfilled messages (older than the mapping) are exempt. Counters reset when the service restarts.
+- Content keeps the identity it was created with: switching a mapping back to `"user"` still edits bridge-written content as the bridge, and vice versa.
+- Read tokens stay **Issues: read**. The App must already have Issues: read and write (required above).
+
+Settings are validated (unknown keys are rejected). An empty object `{}` restores upstream behaviour.
+
 ## GitHub App installation access (required for repository reads)
 
 In your GitHub App settings, find the numeric **App ID**, then generate and download an RSA private key under **Private keys**. In the dashboard, first save the app’s client ID, slug, and client secret, then enter its App ID and paste the PEM private key into **App installation access**. The server validates that the ID and key belong to the same app as the saved client settings. The key is encrypted and never returned by the API.

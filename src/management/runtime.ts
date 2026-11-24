@@ -15,6 +15,7 @@ import { LivePlatforms } from "../bridge/platforms";
 import { issueCommand } from "../bridge/commands";
 import { Mapping, ManagementStore } from "./store";
 import { Task } from "../bridge/types";
+import { resolveConfig } from "../bridge/config";
 
 import { WriteBlocked } from "../bridge/authorship";
 import { GitHubInstallations } from "./installations";
@@ -215,7 +216,11 @@ export class Runtime {
           await issueCommand(interaction, worker.store, worker.api, {
             forum: worker.mapping.channel,
             roles: worker.mapping.roles,
-            authorize: async (id) => Boolean(await this.accounts?.access(id)),
+            // Bridge mode writes as the GitHub App, so no linked account is needed.
+            authorize:
+              resolveConfig(worker.mapping.bridge).writeMode === "bridge"
+                ? undefined
+                : async (id) => Boolean(await this.accounts?.access(id)),
           });
         } catch {
           const text =
@@ -257,6 +262,7 @@ export class Runtime {
       for (const worker of this.workers.values()) {
         if (!worker.mapping.enabled) continue;
         const mapping = worker.mapping;
+        const config = resolveConfig(mapping.bridge);
         if (!this.installations?.config().configured) {
           worker.error =
             "Configure the GitHub App ID and private key in the dashboard.";
@@ -278,6 +284,22 @@ export class Runtime {
               ),
             invalidateReadToken: () =>
               this.installations!.invalidate(mapping.owner, mapping.repo),
+            config,
+            writeToken:
+              config.writeMode === "bridge"
+                ? () =>
+                    this.installations!.repositoryToken(
+                      mapping.owner,
+                      mapping.repo,
+                      mapping.repositoryId,
+                      mapping.installation,
+                      "write",
+                    )
+                : undefined,
+            invalidateWriteToken: () =>
+              this.installations!.invalidate(mapping.owner, mapping.repo),
+            botLogin: this.installations!.botLogin?.(),
+            started: () => worker.store.meta("started"),
           },
           this.accounts,
         );

@@ -31,7 +31,8 @@ export interface Authorship {
 export class WriteBlocked extends Error {
   constructor(
     readonly discordId: string | undefined,
-    readonly reason: "link" | "permission" | "original-author",
+    readonly reason:
+      "link" | "permission" | "original-author" | "role" | "rate",
     message: string,
   ) {
     super(message);

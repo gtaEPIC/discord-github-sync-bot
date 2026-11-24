@@ -542,6 +542,51 @@ describe("management API", () => {
       ).status,
     ).toBe(400);
   });
+  it("saves validated bridge settings for admins only, audits them, and reloads", async () => {
+    const { publicApp, auth, headers, store, control } = setup();
+    store.saveMapping({
+      id: "m1",
+      owner: "org",
+      repo: "one",
+      channel: "123456",
+      backfill: false,
+      enabled: true,
+      roles: [],
+    });
+    const send = (config: unknown, cookie?: string) =>
+      request(publicApp)
+        .post("/api/mappings/m1/config")
+        .set({ ...headers, ...(cookie ? { Cookie: cookie } : {}) })
+        .send({ config });
+    expect((await send({ writeMode: "bridge" })).status).toBe(401);
+    const cookie = auth();
+    const bad = await send({ writeMode: "everyone", typo: 1 }, cookie);
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toContain("Unknown setting");
+    expect(store.mapping("m1")!.bridge).toBeUndefined();
+    const good = await send(
+      { writeMode: "bridge", allowRoles: ["111111"] },
+      cookie,
+    );
+    expect(good.status).toBe(200);
+    expect(store.mapping("m1")).toMatchObject({
+      enabled: true,
+      bridge: { writeMode: "bridge", allowRoles: ["111111"] },
+    });
+    expect(control.reload).toHaveBeenCalled();
+    expect(JSON.stringify(store.activity())).toContain("bridge settings");
+    // Pausing keeps the settings.
+    await request(publicApp)
+      .post("/api/mappings/m1")
+      .set({ ...headers, Cookie: cookie })
+      .send({ enabled: false });
+    expect(store.mapping("m1")!.bridge).toEqual({
+      writeMode: "bridge",
+      allowRoles: ["111111"],
+    });
+    expect((await send({}, cookie)).status).toBe(200);
+    expect(store.mapping("m1")!.bridge).toEqual({});
+  });
   it("routes organization webhook events by repository, isolating identical issue numbers", async () => {
     const { store, publicApp, headers, control, states, directory } = setup();
     store.saveSecret("webhook", "shared-webhook-secret");

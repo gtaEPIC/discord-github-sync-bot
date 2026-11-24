@@ -188,13 +188,15 @@ export class GitHubInstallations {
     installation: number,
     repositories?: string[],
     repositoryIds?: number[],
+    access: "read" | "write" = "read",
   ) {
     return this.api(
       "POST",
       `/app/installations/${installation}/access_tokens`,
       this.appJwt(),
       {
-        permissions: { issues: "read", metadata: "read" },
+        // Write tokens exist only for a mapping's opt-in bridge write mode.
+        permissions: { issues: access, metadata: "read" },
         ...(repositoryIds
           ? { repository_ids: repositoryIds }
           : repositories
@@ -251,8 +253,10 @@ export class GitHubInstallations {
     repo: string,
     repositoryId?: number,
     installationId?: number,
+    access: "read" | "write" = "read",
   ) {
-    const key = `repo:${owner.toLowerCase()}/${repo.toLowerCase()}:${repositoryId ?? ""}:${installationId ?? ""}`;
+    // Keep the `repo:owner/repo:` prefix so invalidate() clears read and write tokens together.
+    const key = `repo:${owner.toLowerCase()}/${repo.toLowerCase()}:${repositoryId ?? ""}:${installationId ?? ""}${access === "write" ? ":write" : ""}`;
     return this.cached(key, async () => {
       const installation = await this.api(
         "GET",
@@ -269,8 +273,14 @@ export class GitHubInstallations {
         installation.id,
         repositoryId ? undefined : [repo],
         repositoryId ? [repositoryId] : undefined,
+        access,
       );
     });
+  }
+  /** Login of the App's bot user (`slug[bot]`), the author of bridge-mode writes. */
+  botLogin(): string | undefined {
+    const slug = JSON.parse(this.store.get("githubApp") ?? "{}").slug;
+    return typeof slug === "string" && slug ? `${slug}[bot]` : undefined;
   }
   clear() {
     this.cache.clear();
