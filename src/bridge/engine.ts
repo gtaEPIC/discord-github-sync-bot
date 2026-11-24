@@ -10,7 +10,8 @@ import {
   sourceBody,
 } from "./content";
 import { Issue, Link, Message, Platforms, Task } from "./types";
-import { planMetadata } from "./reconcile";
+import { MetadataInput, githubStatusTag, planMetadata } from "./reconcile";
+import { ProjectItem } from "./projects";
 
 export interface EngineOptions {
   /** Bridge mode: Discord title and tag changes are written to GitHub. Otherwise GitHub wins. */
@@ -30,6 +31,8 @@ export class Engine {
     switch (task.type) {
       case "scan":
         return this.scan();
+      case "project":
+        return this.project();
       case "github":
         return this.github(task.issue);
       case "discord":
@@ -220,6 +223,41 @@ export class Engine {
     }
   }
 
+  /**
+   * Read the Projects board and queue the linked issues whose Status moved. User-owned
+   * projects have no webhook, so this poll is how board moves reach Discord. Never fails
+   * the job: a failed job would block later polls.
+   */
+  async project() {
+    this.store.setMeta("projectPoll", String(Date.now()));
+    let items: Map<number, ProjectItem> | undefined;
+    try {
+      items = await this.api.projectItems();
+    } catch (error) {
+      this.projectProblem(error);
+      return;
+    }
+    if (!items) return;
+    this.store.deleteMeta("projectError");
+    const statusTags = await this.api.statusTags();
+    for (const link of this.store.links()) {
+      const agreed = link.snap?.status;
+      if (link.disabled || agreed === undefined) continue;
+      const status = items.get(link.issue)?.status ?? null;
+      if (githubStatusTag(status, statusTags, [agreed]) !== agreed)
+        this.store.enqueue({ type: "github", issue: link.issue });
+    }
+  }
+
+  /** Projects reads are optional: record the problem once and carry on without Status. */
+  private projectProblem(error: unknown) {
+    const message = (error as Error)?.message ?? String(error);
+    if (this.store.meta("projectError") !== message) {
+      this.store.setMeta("projectError", message);
+      console.error(`Projects status sync: ${message}`);
+    }
+  }
+
   /** A state change reached GitHub: an older held command must not undo it later. */
   private settleState(issue: number) {
     this.store.unblock(`state:${issue}`);
@@ -234,51 +272,88 @@ export class Engine {
    */
   private async metadata(link: Link, issue: Issue) {
     const previous = link.snap;
-    const [meta, managed, closeTags] = await Promise.all([
+    const [meta, managed, closeTags, statusTags] = await Promise.all([
       this.api.threadMeta(link.thread),
       this.api.managedTags(),
       this.api.closeTags(),
+      this.api.statusTags(),
     ]);
-    const plan = planMetadata({
+    let project: ProjectItem | null | undefined;
+    if (statusTags.length) {
+      try {
+        project = await this.api.projectStatus(issue.number);
+        // Open issues join the board once: with the status tag already on the post (bridge
+        // mode), else the default status.
+        const tagged = this.options.discordWrites
+          ? statusTags.find((t) => meta.tags.includes(t.id))?.option
+          : undefined;
+        const initial = tagged ?? this.api.defaultStatus();
+        if (
+          project === null &&
+          previous?.status === undefined &&
+          issue.state === "open" &&
+          initial
+        ) {
+          await this.api.setProjectStatus(issue.number, initial);
+          project = { id: "", status: initial };
+        }
+      } catch (error) {
+        // Without the board, status tags are left as they are this time.
+        this.projectProblem(error);
+        project = undefined;
+      }
+    }
+    const input = (item: ProjectItem | null | undefined): MetadataInput => ({
       number: issue.number,
       github: {
         title: issue.title,
         labels: issue.labels,
         state: issue.state,
         reason: issue.stateReason,
+        status: item === undefined ? undefined : (item?.status ?? null),
       },
       discord: { name: meta.name, tags: meta.tags },
       managed,
       closeTags,
+      statusTags,
       snap: previous,
       discordWrites: Boolean(this.options.discordWrites),
     });
-    const { github } = plan;
+    let plan = planMetadata(input(project));
     const key = `meta:${issue.number}`;
-    if (
-      github.title !== undefined ||
-      github.addLabels.length ||
-      github.removeLabels.length ||
-      github.state
-    ) {
-      try {
+    const opened = () => previous?.state === "closed" && issue.state === "open";
+    try {
+      if (plan.github.project && project !== undefined) {
+        // The board was read from a cache: check it before overwriting a move made on GitHub.
+        const fresh = await this.api.projectStatus(issue.number, true);
+        if ((fresh?.status ?? null) !== (project?.status ?? null))
+          plan = planMetadata(input((project = fresh)));
+      }
+      const { github } = plan;
+      if (
+        github.title !== undefined ||
+        github.addLabels.length ||
+        github.removeLabels.length ||
+        github.state
+      ) {
         await this.api.updateIssue(issue.number, github);
-      } catch (error) {
-        // Leave Discord and the snapshot as they are, so the change is retried on the next scan.
-        if (await this.hold(error, key, undefined, link.thread))
-          return {
-            reopened: previous?.state === "closed" && issue.state === "open",
-          };
-        throw error;
+        if (github.state) {
+          this.settleState(issue.number);
+          issue.state = github.state;
+          issue.stateReason =
+            github.state === "closed" ? github.reason : "reopened";
+        }
       }
-      if (github.state) {
-        this.settleState(issue.number);
-        issue.state = github.state;
-        issue.stateReason =
-          github.state === "closed" ? github.reason : "reopened";
-      }
+      if (github.project)
+        await this.api.setProjectStatus(issue.number, github.project.status);
+    } catch (error) {
+      // Leave Discord and the snapshot as they are, so the change is retried on the next scan.
+      if (await this.hold(error, key, undefined, link.thread))
+        return { reopened: opened() };
+      throw error;
     }
-    const reopened = previous?.state === "closed" && issue.state === "open";
+    const { github } = plan;
+    const reopened = opened();
     this.store.unblock(key);
     const applied = await this.api.applyMeta(link.thread, {
       name: plan.discord.name,
@@ -293,8 +368,10 @@ export class Engine {
     ];
     const overflow = new Set(plan.overflow);
     let closedHidden = plan.closedHidden;
+    let statusHidden = plan.statusHidden;
     for (const id of applied.overflow) {
       if (id === plan.closed) closedHidden = true;
+      if (id === plan.status) statusHidden = true;
       const label = managed.find((m) => m.id === id)?.label;
       if (label) overflow.add(label);
     }
@@ -309,6 +386,10 @@ export class Engine {
       state: issue.state,
       closed: plan.closed,
       closedHidden,
+      // Status unknown this time (board unreachable): keep the last agreed value.
+      status: plan.status !== undefined ? plan.status : previous?.status,
+      statusHidden:
+        plan.status !== undefined ? statusHidden : previous?.statusHidden,
     };
     this.store.saveLink(link);
     return { reopened };

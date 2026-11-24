@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CloseTag,
   ManagedTag,
+  StatusTag,
   MetadataInput,
   managedTags,
   planMetadata,
@@ -392,5 +393,146 @@ describe("close tags", () => {
     const result = plan({ github: closedAs("completed") });
     expect(result.closed).toBeUndefined();
     expect(result.github.state).toBeUndefined();
+  });
+});
+
+describe("Projects status", () => {
+  const statusTags: StatusTag[] = [
+    { id: "s-backlog", name: "Backlog", option: "Backlog" },
+    { id: "s-progress", name: "In Progress", option: "In Progress" },
+    { id: "s-doing", name: "Doing", option: "In Progress" },
+  ];
+  const closeTags: CloseTag[] = [
+    { id: "c-fixed", name: "Fixed", reason: "completed" },
+  ];
+  const github = (status: string | null, extra = {}) => ({
+    title: "Train stuck",
+    labels: ["bug"],
+    state: "open" as const,
+    status,
+    ...extra,
+  });
+  const snap = (status: string | null, extra = {}) => ({
+    title: "Train stuck",
+    labels: ["bug"],
+    closed: null,
+    status,
+    ...extra,
+  });
+  const tags = (...extra: string[]) => ({
+    name: "#7 Train stuck",
+    tags: ["t-bug", ...extra],
+  });
+  const run = (overrides: Partial<MetadataInput>) =>
+    plan({
+      closeTags,
+      statusTags,
+      github: github("Backlog"),
+      discord: tags("s-backlog"),
+      snap: snap("s-backlog"),
+      ...overrides,
+    });
+
+  it("is quiet when the board and the tag agree", () => {
+    const result = run({});
+    expect(result.status).toBe("s-backlog");
+    expect(result.github.project).toBeUndefined();
+    expect(result.discord).toMatchObject({ addTags: [], removeTags: [] });
+  });
+  it("moves the card when the status tag changes on Discord; the new tag replaces the old one", () => {
+    const result = run({ discord: tags("s-backlog", "s-progress") });
+    expect(result.github.project).toEqual({ status: "In Progress" });
+    expect(result.discord.removeTags).toEqual(["s-backlog"]);
+    expect(result.status).toBe("s-progress");
+  });
+  it("swaps the tag when the card moves on GitHub, and GitHub wins a conflict", () => {
+    const moved = run({ github: github("In Progress") });
+    expect(moved.discord).toMatchObject({
+      addTags: ["s-progress"],
+      removeTags: ["s-backlog"],
+    });
+    expect(moved.github.project).toBeUndefined();
+    const conflict = run({
+      github: github("In Progress"),
+      discord: tags(),
+    });
+    expect(conflict.github.project).toBeUndefined();
+    expect(conflict.discord.addTags).toEqual(["s-progress"]);
+  });
+  it("clears the Status when the tag is removed, and shows no tag for an unmapped option", () => {
+    expect(run({ discord: tags() }).github.project).toEqual({ status: null });
+    const done = run({ github: github("Done") });
+    expect(done.status).toBeNull();
+    expect(done.discord.removeTags).toEqual(["s-backlog"]);
+    expect(done.github.project).toBeUndefined();
+  });
+  it("does not move the card between two tags for the same option", () => {
+    const result = run({
+      github: github("In Progress"),
+      discord: tags("s-doing"),
+      snap: snap("s-progress"),
+    });
+    expect(result.github.project).toBeUndefined();
+    expect(result.status).toBe("s-doing");
+    expect(result.discord).toMatchObject({ addTags: [], removeTags: [] });
+  });
+  it("hides status tags while closed and ignores Discord status changes then", () => {
+    const closed = run({
+      github: github("Backlog", { state: "closed", reason: "completed" }),
+      discord: tags("c-fixed", "s-progress"),
+      snap: snap("s-backlog", { closed: "c-fixed" }),
+    });
+    expect(closed.github.project).toBeUndefined();
+    expect(closed.discord.removeTags).toEqual(["s-progress"]);
+    expect(closed.status).toBe("s-backlog");
+    // Closing from Discord also drops the status tag without touching the board.
+    const closing = run({ discord: tags("s-backlog", "c-fixed") });
+    expect(closing.github).toMatchObject({ state: "closed" });
+    expect(closing.github.project).toBeUndefined();
+    expect(closing.discord.removeTags).toEqual(["s-backlog"]);
+    // Reopening shows the board's status again.
+    const reopened = run({
+      github: github("In Progress"),
+      discord: tags(),
+      snap: snap("s-backlog", { closed: "c-fixed" }),
+    });
+    expect(reopened.discord.addTags).toEqual(["s-progress"]);
+    expect(reopened.github.project).toBeUndefined();
+  });
+  it("leaves status tags alone while the board is unknown", () => {
+    const result = run({
+      github: github(null, { status: undefined }),
+      discord: tags("s-progress"),
+    });
+    expect(result.status).toBeUndefined();
+    expect(result.github.project).toBeUndefined();
+    expect(result.discord).toMatchObject({ addTags: [], removeTags: [] });
+  });
+  it("reverts status tags in user mode and lets GitHub win without a status snapshot", () => {
+    for (const overrides of [
+      { discordWrites: false },
+      { snap: { title: "Train stuck", labels: ["bug"] } },
+    ]) {
+      const result = run({ discord: tags("s-progress"), ...overrides });
+      expect(result.github.project).toBeUndefined();
+      expect(result.discord).toMatchObject({
+        addTags: ["s-backlog"],
+        removeTags: ["s-progress"],
+      });
+    }
+  });
+  it("ranks the close tag, then the status tag, then labels for the five slots", () => {
+    const result = run({
+      github: github("Backlog", { labels: ["bug", "crash", "ui"] }),
+      discord: {
+        name: "#7 Train stuck",
+        tags: ["u1", "u2", "t-bug", "t-crash", "t-ui"],
+      },
+      snap: snap(null, { labels: ["bug", "crash", "ui"] }),
+    });
+    expect(result.discord.addTags).toEqual(["s-backlog"]);
+    expect(result.discord.removeTags).toEqual(["t-ui"]);
+    expect(result.overflow).toEqual(["ui"]);
+    expect(result.github.project).toBeUndefined();
   });
 });

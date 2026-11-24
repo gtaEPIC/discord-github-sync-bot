@@ -13,6 +13,7 @@
     "format": "prettier --write src README.md",
     "queue": "node dist/queue.js",
     "smoke": "node scripts/smoke.mjs",
+    "projects-check": "node scripts/projects-check.mjs",
     "admin": "node dist/admin.js"
   },
   "author": "Austin Melchior (Sillhouette)",

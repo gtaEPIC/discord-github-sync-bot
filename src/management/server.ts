@@ -1,8 +1,8 @@
 import express, { Request, Response } from "express";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { ManagementStore } from "./store";
-import { Runtime } from "./runtime";
-import { validateDiscord } from "./providers";
+import { PROJECTS_TOKEN, Runtime } from "./runtime";
+import { validateDiscord, validateProjects } from "./providers";
 import { verifySignature } from "../webhookSignature";
 import { linkPage, linkCss } from "./linkPages";
 import { createUserRouter, browserSession, UserControl } from "./userServer";
@@ -72,7 +72,10 @@ export function createManagementServer(
   store: ManagementStore,
   runtime: Control,
   options: Options,
-  providers = { validateDiscord },
+  providers: {
+    validateDiscord: typeof validateDiscord;
+    validateProjects?: typeof validateProjects;
+  } = { validateDiscord, validateProjects },
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -521,6 +524,9 @@ export function createManagementServer(
             linkedAt,
           })) ?? [],
       webhookConfigured: Boolean(store.secret("webhook")),
+      projectsToken: store.secret(PROJECTS_TOKEN)
+        ? { login: store.get("projectsTokenLogin") ?? "unknown" }
+        : undefined,
       webhookUrl: options.publicUrl
         ? `${new URL(options.publicUrl).origin}/github-webhook`
         : undefined,
@@ -759,6 +765,24 @@ export function createManagementServer(
       );
       void runtime.reload();
       res.json({ ok: true, bridge });
+    }),
+  );
+  app.post(
+    "/api/projects-token",
+    action(async (req, res) => {
+      const token = field(req.body, "token", false, 4096);
+      let login: string;
+      try {
+        ({ login } = await (providers.validateProjects ?? validateProjects)(
+          token,
+        ));
+      } catch (error) {
+        throw new PublicError((error as Error).message);
+      }
+      store.saveSecret(PROJECTS_TOKEN, token);
+      store.set("projectsTokenLogin", login);
+      store.audit("admin", `updated the Projects token (@${login})`);
+      res.json({ ok: true, login });
     }),
   );
   for (const task of ["scan", "retry"] as const)

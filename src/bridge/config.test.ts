@@ -75,6 +75,36 @@ describe("bridge settings", () => {
     ])
       expect(() => parseBridgeConfig({ closeTags: bad })).toThrow(ConfigError);
   });
+  it("validates Projects status settings and fills defaults", () => {
+    const status = {
+      owner: "gtaEPIC",
+      number: 2,
+      tags: { "In Progress": "In Progress" },
+      defaultOption: "Backlog",
+    };
+    expect(parseBridgeConfig({ status })).toEqual({ status });
+    expect(resolveConfig({ status }).status).toEqual({
+      ...status,
+      field: "Status",
+      pollSeconds: 120,
+    });
+    expect(resolveConfig({}).status).toBeUndefined();
+    for (const bad of [
+      { ...status, owner: "not a login" },
+      { ...status, number: 0 },
+      { ...status, tags: {} },
+      { ...status, pollSeconds: 30 },
+      { ...status, column: "Status" },
+      "board",
+    ])
+      expect(() => parseBridgeConfig({ status: bad })).toThrow(ConfigError);
+    expect(() =>
+      parseBridgeConfig({
+        closeTags: [{ tag: "Done", reason: "completed" }],
+        status: { ...status, tags: { done: "Done" } },
+      }),
+    ).toThrow(/both a close tag and a status tag/);
+  });
   it("never resolves corrupt stored settings to bridge mode", () => {
     expect(resolveConfig({ writeMode: "bridge", typo: true }).writeMode).toBe(
       "user",

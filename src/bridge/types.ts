@@ -1,5 +1,6 @@
 import { Relay, Writer } from "./authorship";
-import { CloseTag, ManagedTag, Snapshot } from "./reconcile";
+import { CloseTag, ManagedTag, Snapshot, StatusTag } from "./reconcile";
+import { ProjectItem } from "./projects";
 import { CloseReason } from "./config";
 export interface Issue {
   number: number;
@@ -91,6 +92,7 @@ export type Task =
   | { type: "discord"; thread: string }
   | { type: "state"; issue: number; state: "open" | "closed"; actor?: string }
   | { type: "scan" }
+  | { type: "project" }
   | { type: "unlink"; thread: string };
 export interface Platforms {
   getIssue(number: number): Promise<Issue>;
@@ -127,6 +129,22 @@ export interface Platforms {
   managedTags(): Promise<ManagedTag[]>;
   /** Configured close tags that exist in the forum. */
   closeTags(): Promise<CloseTag[]>;
+  /** Configured status tags that exist in the forum; empty when Status sync is off. */
+  statusTags(): Promise<StatusTag[]>;
+  /**
+   * The issue's Projects item: cached from the last board read unless `fresh`. Null when the
+   * issue is not on the board; undefined when Status sync is off.
+   */
+  projectStatus(
+    number: number,
+    fresh?: boolean,
+  ): Promise<ProjectItem | null | undefined>;
+  /** Read the whole board; undefined when Status sync is off. */
+  projectItems(): Promise<Map<number, ProjectItem> | undefined>;
+  /** Set or clear an issue's Status, adding it to the board first when needed. */
+  setProjectStatus(number: number, status: string | null): Promise<void>;
+  /** Status for open issues that are not on the board yet; undefined = do not add them. */
+  defaultStatus(): string | undefined;
   threadMeta(thread: string): Promise<ThreadMeta>;
   /**
    * Apply only the given changes, as a delta against the thread's current tags.

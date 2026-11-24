@@ -32,6 +32,23 @@ export interface BridgeConfig {
    * shown when GitHub's reason has no tag of its own. Make these tags moderated in Discord.
    */
   closeTags: { tag: string; reason: CloseReason }[];
+  /** Projects v2 Status sync. Off when absent; needs the Projects token (Admin -> Connections). */
+  status?: StatusConfig;
+}
+
+export interface StatusConfig {
+  /** GitHub login that owns the (user-level) project. */
+  owner: string;
+  /** Project number, from its URL. */
+  number: number;
+  /** Single-select field to sync. */
+  field: string;
+  /** Forum tag name -> option name. Leave "Done" out: the close tag stands for it. */
+  tags: Record<string, string>;
+  /** Option for open issues that are not on the board yet; absent = they are not added. */
+  defaultOption?: string;
+  /** How often the board is read, in seconds. */
+  pollSeconds: number;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = Object.freeze({
@@ -49,7 +66,24 @@ export class ConfigError extends Error {
   }
 }
 
-const KEYS = ["writeMode", "allowRoles", "rateLimit", "labels", "closeTags"];
+const KEYS = [
+  "writeMode",
+  "allowRoles",
+  "rateLimit",
+  "labels",
+  "closeTags",
+  "status",
+];
+const STATUS_KEYS = [
+  "owner",
+  "number",
+  "field",
+  "tags",
+  "defaultOption",
+  "pollSeconds",
+];
+const text = (value: unknown, max: number) =>
+  typeof value === "string" && value.trim() !== "" && value.length <= max;
 const RATE_KEYS = ["issuesPerHour", "commentsPerHour"];
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -158,6 +192,70 @@ export function parseBridgeConfig(value: unknown): Partial<BridgeConfig> {
         ({ tag, reason }) => ({ tag, reason }),
       );
   }
+  if (value.status !== undefined) {
+    const status = value.status;
+    if (!isObject(status)) problems.push("status must be an object.");
+    else {
+      const before = problems.length;
+      for (const key of Object.keys(status))
+        if (!STATUS_KEYS.includes(key))
+          problems.push(`Unknown setting "status.${key}".`);
+      if (
+        typeof status.owner !== "string" ||
+        !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(status.owner)
+      )
+        problems.push("status.owner must be a GitHub user login.");
+      if (!Number.isInteger(status.number) || (status.number as number) < 1)
+        problems.push("status.number must be the project number.");
+      if (status.field !== undefined && !text(status.field, 100))
+        problems.push("status.field must be a field name.");
+      const tags = isObject(status.tags) ? Object.entries(status.tags) : [];
+      if (
+        !isObject(status.tags) ||
+        !tags.length ||
+        tags.length > 20 ||
+        tags.some(([tag, option]) => !text(tag, 20) || !text(option, 100))
+      )
+        problems.push(
+          "status.tags must map 1 to 20 forum tag names (max 20 characters) to Status option names.",
+        );
+      else {
+        const close = new Set(
+          (result.closeTags ?? []).map((t) => t.tag.trim().toLowerCase()),
+        );
+        const names = tags.map(([tag]) => tag.trim().toLowerCase());
+        if (names.some((n) => close.has(n)))
+          problems.push("A tag cannot be both a close tag and a status tag.");
+        if (new Set(names).size !== names.length)
+          problems.push("status.tags lists the same tag twice.");
+      }
+      if (
+        status.defaultOption !== undefined &&
+        !text(status.defaultOption, 100)
+      )
+        problems.push("status.defaultOption must be an option name.");
+      if (
+        status.pollSeconds !== undefined &&
+        (!Number.isInteger(status.pollSeconds) ||
+          (status.pollSeconds as number) < 60 ||
+          (status.pollSeconds as number) > 3600)
+      )
+        problems.push("status.pollSeconds must be from 60 to 3600.");
+      if (problems.length === before)
+        result.status = {
+          owner: status.owner as string,
+          number: status.number as number,
+          ...(status.field !== undefined && { field: status.field as string }),
+          tags: Object.fromEntries(tags) as Record<string, string>,
+          ...(status.defaultOption !== undefined && {
+            defaultOption: status.defaultOption as string,
+          }),
+          ...(status.pollSeconds !== undefined && {
+            pollSeconds: status.pollSeconds as number,
+          }),
+        } as StatusConfig;
+    }
+  }
   if (problems.length) throw new ConfigError(problems);
   return result;
 }
@@ -176,5 +274,10 @@ export function resolveConfig(stored: unknown): BridgeConfig {
     rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...parsed.rateLimit },
     labels: parsed.labels ?? {},
     closeTags: parsed.closeTags ?? [],
+    status: parsed.status && {
+      ...parsed.status,
+      field: parsed.status.field ?? "Status",
+      pollSeconds: parsed.status.pollSeconds ?? 120,
+    },
   };
 }

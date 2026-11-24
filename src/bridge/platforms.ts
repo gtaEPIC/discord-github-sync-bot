@@ -20,8 +20,10 @@ import {
   ThreadMeta,
 } from "./types";
 import { BridgeConfig, DEFAULT_CONFIG } from "./config";
+import { ProjectsClient } from "./projects";
 import {
   CloseTag,
+  StatusTag,
   MAX_TAGS,
   ManagedTag,
   managedTags,
@@ -46,6 +48,8 @@ type Options = {
   started?: () => string | undefined;
   /** Discord role IDs of a guild member (injectable for tests). */
   memberRoles?: (discordId: string) => Promise<string[]>;
+  /** Projects v2 client; present when the mapping has Status sync and a Projects token exists. */
+  projects?: ProjectsClient;
 };
 type Rules = { limit?: "issue" | "comment"; roles?: boolean; source?: Message };
 const HOUR = 3600_000;
@@ -420,7 +424,10 @@ export class LivePlatforms implements Platforms {
   }
   async managedTags(): Promise<ManagedTag[]> {
     const close = new Set(
-      this.config.closeTags.map((t) => t.tag.toLowerCase()),
+      [
+        ...this.config.closeTags.map((t) => t.tag),
+        ...Object.keys(this.config.status?.tags ?? {}),
+      ].map((t) => t.toLowerCase()),
     );
     return managedTags(
       (this.forum?.availableTags ?? [])
@@ -440,6 +447,40 @@ export class LivePlatforms implements Platforms {
       if (found) result.push({ id: found.id, name: found.name, reason });
     }
     return result;
+  }
+  async statusTags(): Promise<StatusTag[]> {
+    const available = this.forum?.availableTags ?? [];
+    const result: StatusTag[] = [];
+    for (const [tag, option] of Object.entries(
+      this.config.status?.tags ?? {},
+    )) {
+      const found = available.find(
+        (t) => t.name.toLowerCase() === tag.toLowerCase(),
+      );
+      if (found) result.push({ id: found.id, name: found.name, option });
+    }
+    return result;
+  }
+  private get projects() {
+    return this.config.status ? this.options.projects : undefined;
+  }
+  async projectStatus(number: number, fresh = false) {
+    return this.projects?.item(number, fresh);
+  }
+  async projectItems() {
+    return this.projects?.scan();
+  }
+  async setProjectStatus(number: number, status: string | null) {
+    if (!this.projects)
+      throw new WriteBlocked(
+        undefined,
+        "permission",
+        "Projects status sync needs a Projects token (Admin -> Connections).",
+      );
+    await this.projects.setStatus(number, status);
+  }
+  defaultStatus() {
+    return this.config.status?.defaultOption;
   }
   private async memberRoles(discordId: string): Promise<string[]> {
     const cached = this.roleCache.get(discordId);

@@ -39,6 +39,11 @@ function setup() {
   };
   const providers = {
     validateDiscord: vi.fn(async () => "Bot"),
+    validateProjects: vi.fn(async (token: string) => {
+      if (token !== "ghp_valid-projects-token")
+        throw new Error("The token needs the project scope.");
+      return { login: "machine", scopes: ["project", "repo"] };
+    }),
   };
   const installations = {
     config: vi.fn(() => ({
@@ -541,6 +546,28 @@ describe("management API", () => {
           .send({ ...body, repository: "other/one", channel: "654321" })
       ).status,
     ).toBe(400);
+  });
+  it("stores a validated Projects token write-only for admins", async () => {
+    const { publicApp, auth, headers, store } = setup();
+    const send = (token: string, cookie?: string) =>
+      request(publicApp)
+        .post("/api/projects-token")
+        .set({ ...headers, ...(cookie ? { Cookie: cookie } : {}) })
+        .send({ token });
+    expect((await send("ghp_valid-projects-token")).status).toBe(401);
+    const cookie = auth();
+    const bad = await send("ghp_wrong", cookie);
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toContain("project scope");
+    expect(store.secret("projects-token")).toBeUndefined();
+    expect((await send("ghp_valid-projects-token", cookie)).status).toBe(200);
+    expect(store.secret("projects-token")).toBe("ghp_valid-projects-token");
+    const state = await request(publicApp)
+      .get("/api/state")
+      .set({ ...headers, Cookie: cookie });
+    expect(state.body.projectsToken).toEqual({ login: "machine" });
+    expect(JSON.stringify(state.body)).not.toContain("valid-projects-token");
+    expect(JSON.stringify(store.activity())).toContain("Projects token");
   });
   it("saves validated bridge settings for admins only, audits them, and reloads", async () => {
     const { publicApp, auth, headers, store, control } = setup();

@@ -16,7 +16,8 @@ import {
   Post,
   ThreadMeta,
 } from "./types";
-import { CloseTag, ManagedTag } from "./reconcile";
+import { CloseTag, ManagedTag, StatusTag } from "./reconcile";
+import { ProjectItem } from "./projects";
 
 class Fake implements Platforms {
   gh: Issue[] = [];
@@ -87,6 +88,22 @@ class Fake implements Platforms {
   managedTags = vi.fn(async () => structuredClone(this.managed));
   close: CloseTag[] = [];
   closeTags = vi.fn(async () => structuredClone(this.close));
+  statusList: StatusTag[] = [];
+  statusTags = vi.fn(async () => structuredClone(this.statusList));
+  /** The Projects board; undefined = Status sync off. */
+  board?: Map<number, ProjectItem>;
+  initialStatus?: string;
+  projectStatus = vi.fn(async (number: number, _fresh?: boolean) =>
+    this.board ? structuredClone(this.board.get(number) ?? null) : undefined,
+  );
+  projectItems = vi.fn(async () => structuredClone(this.board));
+  setProjectStatus = vi.fn(async (number: number, status: string | null) => {
+    const item = this.board!.get(number);
+    if (item) item.status = status;
+    else if (status !== null)
+      this.board!.set(number, { id: `item-${number}`, status });
+  });
+  defaultStatus = vi.fn(() => this.initialStatus);
   threadMeta = vi.fn(async (thread: string) => {
     const meta = this.meta.get(thread);
     if (!meta) throw Object.assign(new Error("Not found"), { status: 404 });
@@ -887,6 +904,141 @@ describe("close tags", () => {
     expect(store.health()).toMatchObject({ blocked: 1, failed: 0 });
     await engine.github(issue.number);
     expect(api.gh[0].state).toBe("closed");
+    expect(store.health().blocked).toBe(0);
+  });
+});
+
+describe("Projects status", () => {
+  const statusList: StatusTag[] = [
+    { id: "s-backlog", name: "Backlog", option: "Backlog" },
+    { id: "s-progress", name: "In Progress", option: "In Progress" },
+  ];
+  async function linked(options: EngineOptions, status = "Backlog") {
+    const ctx = setup(options);
+    ctx.api.statusList = statusList;
+    ctx.api.close = [{ id: "c-fixed", name: "Fixed", reason: "completed" }];
+    ctx.api.board = new Map();
+    const issue = ctx.api.addIssue({ title: "Train stuck" });
+    ctx.api.board.set(issue.number, { id: "item", status });
+    await ctx.engine.github(issue.number);
+    const thread = ctx.store.link(issue.number)!.thread;
+    return { ...ctx, issue, thread, meta: ctx.api.meta.get(thread)! };
+  }
+  const drain = (store: Store) => {
+    const tasks = [];
+    for (let job; (job = store.next()); store.complete(job.id))
+      tasks.push(job.task);
+    return tasks;
+  };
+  it("shows the board's Status as a tag, and a board move reaches Discord through the poll", async () => {
+    const { engine, api, issue, meta, store } = await linked({
+      discordWrites: true,
+    });
+    expect(meta.tags).toEqual(["s-backlog"]);
+    expect(store.link(issue.number)!.snap!.status).toBe("s-backlog");
+    drain(store);
+    await engine.project();
+    expect(drain(store)).toEqual([]);
+    api.board!.get(issue.number)!.status = "In Progress";
+    await engine.project();
+    expect(drain(store)).toEqual([{ type: "github", issue: issue.number }]);
+    await engine.github(issue.number);
+    expect(meta.tags).toEqual(["s-progress"]);
+    expect(api.setProjectStatus).not.toHaveBeenCalled();
+  });
+  it("moves the card when the tag changes on Discord, and the poll then stays quiet", async () => {
+    const { engine, api, issue, meta, store } = await linked({
+      discordWrites: true,
+    });
+    meta.tags = ["s-backlog", "s-progress"];
+    await engine.github(issue.number);
+    expect(api.setProjectStatus).toHaveBeenCalledWith(
+      issue.number,
+      "In Progress",
+    );
+    expect(meta.tags).toEqual(["s-progress"]);
+    drain(store);
+    await engine.project();
+    expect(drain(store)).toEqual([]);
+  });
+  it("checks the board fresh before overwriting a move made on GitHub", async () => {
+    const { engine, api, issue, meta } = await linked({ discordWrites: true });
+    meta.tags = ["s-progress"];
+    // The board moved to Done after the last read; the cached read still says Backlog.
+    const cached = { id: "item", status: "Backlog" };
+    api.projectStatus.mockImplementation(async (_n: number, fresh?: boolean) =>
+      fresh ? { id: "item", status: "Done" } : cached,
+    );
+    await engine.github(issue.number);
+    expect(api.setProjectStatus).not.toHaveBeenCalled();
+    // GitHub wins: Done has no tag, so the Discord tag goes.
+    expect(meta.tags).toEqual([]);
+  });
+  it("adds new open issues to the board with the post's status tag or the default", async () => {
+    const { store, api } = setup();
+    const engine = new Engine(store, api, true, { discordWrites: true });
+    api.statusList = statusList;
+    api.board = new Map();
+    api.initialStatus = "Backlog";
+    const tagged = api.addPost();
+    api.meta.get(tagged.id)!.tags = ["s-progress"];
+    await engine.discord(tagged.id);
+    const first = store.thread(tagged.id)!.issue;
+    await engine.github(first);
+    expect(api.board.get(first)!.status).toBe("In Progress");
+    expect(api.meta.get(tagged.id)!.tags).toEqual(["s-progress"]);
+    const plain = api.addIssue();
+    await engine.github(plain.number);
+    expect(api.board.get(plain.number)!.status).toBe("Backlog");
+    // Taken off the board later: not added back.
+    api.board.delete(plain.number);
+    api.setProjectStatus.mockClear();
+    await engine.github(plain.number);
+    expect(api.setProjectStatus).not.toHaveBeenCalled();
+  });
+  it("ignores status tags while closed and shows the board again on reopen", async () => {
+    const { engine, api, issue, meta } = await linked({ discordWrites: true });
+    Object.assign(api.gh[0], { state: "closed", stateReason: "completed" });
+    await engine.github(issue.number);
+    expect(meta.tags).toEqual(["c-fixed"]);
+    meta.tags = ["c-fixed", "s-progress"];
+    await engine.github(issue.number);
+    expect(api.setProjectStatus).not.toHaveBeenCalled();
+    expect(meta.tags).toEqual(["c-fixed"]);
+    Object.assign(api.gh[0], { state: "open", stateReason: "reopened" });
+    await engine.github(issue.number);
+    expect(meta.tags).toEqual(["s-backlog"]);
+  });
+  it("keeps syncing without the board when it is unreachable, and records why", async () => {
+    const { engine, api, issue, meta, store } = await linked({
+      discordWrites: true,
+    });
+    const problem = new WriteBlocked(undefined, "permission", "token missing");
+    api.projectStatus.mockRejectedValue(problem);
+    api.projectItems.mockRejectedValue(problem);
+    meta.tags = ["s-progress"];
+    api.gh[0].title = "Renamed on GitHub";
+    await engine.github(issue.number);
+    expect(meta.name).toBe(`#${issue.number} Renamed on GitHub`);
+    expect(meta.tags).toEqual(["s-progress"]);
+    expect(store.link(issue.number)!.snap!.status).toBe("s-backlog");
+    await engine.project();
+    expect(store.meta("projectError")).toBe("token missing");
+    expect(store.health()).toMatchObject({ failed: 0, blocked: 0 });
+  });
+  it("holds a refused card move and retries it", async () => {
+    const { engine, api, issue, meta, store } = await linked({
+      discordWrites: true,
+    });
+    meta.tags = ["s-progress"];
+    api.setProjectStatus.mockRejectedValueOnce(
+      new WriteBlocked(undefined, "permission", "no access"),
+    );
+    await engine.github(issue.number);
+    expect(store.health().blocked).toBe(1);
+    expect(meta.tags).toEqual(["s-progress"]);
+    await engine.github(issue.number);
+    expect(api.board!.get(issue.number)!.status).toBe("In Progress");
     expect(store.health().blocked).toBe(0);
   });
 });

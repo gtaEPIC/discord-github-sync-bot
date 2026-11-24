@@ -12,6 +12,7 @@ import path from "node:path";
 import { Store } from "../bridge/database";
 import { Engine } from "../bridge/engine";
 import { LivePlatforms } from "../bridge/platforms";
+import { ProjectsClient } from "../bridge/projects";
 import { issueCommand } from "../bridge/commands";
 import { Mapping, ManagementStore } from "./store";
 import { Task } from "../bridge/types";
@@ -22,18 +23,24 @@ import { GitHubInstallations } from "./installations";
 import { GitHubAccounts } from "./accounts";
 import { accountCommand, githubCommand } from "./accountCommands";
 
+/** Vault id of the classic PAT used only for Projects v2 calls. */
+export const PROJECTS_TOKEN = "projects-token";
+
 interface Worker {
   mapping: Mapping;
   store: Store;
   api?: LivePlatforms;
   engine?: Engine;
   error?: string;
+  /** Projects board poll interval in ms, when Status sync is on. */
+  projectPoll?: number;
 }
 export class Runtime {
   private client?: Client;
   private workers = new Map<string, Worker>();
   private timer?: NodeJS.Timeout;
   private scans?: NodeJS.Timeout;
+  private polls?: NodeJS.Timeout;
   private busy = false;
   private stopped = false;
   private reloading = false;
@@ -79,6 +86,17 @@ export class Runtime {
       for (const w of this.workers.values())
         if (w.mapping.enabled) w.store.enqueue({ type: "scan" });
     }, this.interval);
+    // User-owned Projects have no webhook: read the board on each mapping's own interval.
+    this.polls = setInterval(() => {
+      for (const w of this.workers.values())
+        if (
+          w.mapping.enabled &&
+          w.engine &&
+          w.projectPoll &&
+          Date.now() - Number(w.store.meta("projectPoll") ?? 0) >= w.projectPoll
+        )
+          w.store.enqueue({ type: "project" });
+    }, 15_000);
     this.reload();
   }
   reload() {
@@ -106,6 +124,7 @@ export class Runtime {
         worker.api = undefined;
         worker.engine = undefined;
         worker.error = undefined;
+        worker.projectPoll = undefined;
       }
       const token = this.management.secret("discord");
       if (!token) return;
@@ -312,6 +331,18 @@ export class Runtime {
               this.installations!.invalidate(mapping.owner, mapping.repo),
             botLogin: this.installations!.botLogin?.(),
             started: () => worker.store.meta("started"),
+            // Read per request, so a new token applies without a reload.
+            projects:
+              config.status &&
+              new ProjectsClient({
+                token: () => this.management.secret(PROJECTS_TOKEN),
+                owner: config.status.owner,
+                number: config.status.number,
+                field: config.status.field,
+                defaultOption: config.status.defaultOption,
+                repo: { owner: mapping.owner, repo: mapping.repo },
+                ttl: config.status.pollSeconds * 1000,
+              }),
           },
           this.accounts,
         );
@@ -323,6 +354,10 @@ export class Runtime {
           });
           guilds.add(api.guildId);
           worker.store.enqueue({ type: "scan" }, randomUUID());
+          if (config.status) {
+            worker.projectPoll = config.status.pollSeconds * 1000;
+            worker.store.enqueue({ type: "project" });
+          }
         } catch (error) {
           const err = error as { message?: string; status?: number };
           worker.error = err.message?.startsWith("Missing forum permissions:")
@@ -392,6 +427,9 @@ export class Runtime {
             channel && "name" in channel ? channel.name : mapping.channel,
           ready: Boolean(worker?.engine) && !this.reloading,
           error: worker?.error,
+          projectError: worker?.projectPoll
+            ? worker.store.meta("projectError")
+            : undefined,
           ...(worker?.store.health() ?? {
             blocked: 0,
             pending: 0,
@@ -561,6 +599,7 @@ export class Runtime {
     this.stopped = true;
     clearInterval(this.timer);
     clearInterval(this.scans);
+    clearInterval(this.polls);
     this.client?.destroy();
     while (this.busy || this.reloading)
       await new Promise((resolve) => setTimeout(resolve, 100));
