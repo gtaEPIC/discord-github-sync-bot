@@ -1,5 +1,5 @@
 {
-  "name": "discord-github-sync-bot",
+  "name": "ry-issue-bridge",
   "version": "1.2.0",
   "description": "Bidirectional sync between Discord forum threads and GitHub issues",
   "main": "dist/index.js",

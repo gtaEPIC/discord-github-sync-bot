@@ -4,6 +4,17 @@ A self-hosted GitHub Issues ↔ Discord forum bridge with a management page. Con
 
 Based on [Sillhouette/discord-github-sync-bot](https://github.com/Sillhouette/discord-github-sync-bot), originally by [holmityd](https://github.com/holmityd/GitHub-Issues-Discord-Threads-Bot). MIT; original credits are retained in LICENSE.
 
+## Fork notes (Ry Issue Bridge)
+
+This is a hard fork of [snick-m/discord-github-sync-bot](https://github.com/snick-m/discord-github-sync-bot) (forked at `3ba06f9`), kept as `ry-issue-bridge`. Upstream credits above and in LICENSE are unchanged. The fork adds, in phases (see `PLAN.md`):
+
+- An opt-in per-mapping **bridge write mode**: Discord to GitHub writes use the GitHub App bot with Discord attribution, so reporters need no GitHub account. The upstream linked-user mode stays available.
+- Two-way title and tag/label sync, plus close tags (for example `Fixed`) that close the issue.
+- GitHub Projects v2 Status to and from a Discord status tag, by polling.
+- Commit and cross-reference notices in the thread.
+
+The rest of this README describes upstream behaviour until each phase lands.
+
 ## Manage through the web page
 
 - Connect one Discord bot and choose its available forum channels from a dropdown.
@@ -140,7 +151,7 @@ With the deployed Cloudflare Tunnel, the public hostname is `gitissues.rmush.dev
 Requires Node.js 24+ with built-in SQLite. Run one application instance per data directory.
 
 ```sh
-git clone https://github.com/snick-m/discord-github-sync-bot.git
+git clone https://github.com/gtaEPIC/discord-github-sync-bot.git
 cd discord-github-sync-bot
 touch .env
 # Set PUBLIC_URL to your HTTPS origin if using a public hostname.
