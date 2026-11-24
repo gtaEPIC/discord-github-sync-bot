@@ -124,11 +124,11 @@ Each phase ends with typecheck, tests, build, docker build and smoke green, then
 - Acceptance: a Discord user with no linked GitHub account can open a post, reply, and edit; issue and comments appear with Discord attribution; no echo loops.
 
 ### Phase 2: Titles and tags/labels (D3)
-- [ ] `Link.snap` + `reconcileMetadata`; call it from `github()` and `discord()`.
-- [ ] `ThreadUpdate` listener -> enqueue discord task.
-- [ ] `Platforms.updateIssue({ title, addLabels, removeLabels })`; implement in `LivePlatforms`.
-- [ ] Title prefix strip/compare; managed-label restriction; 5-tag cap handling (do not drop tags the user applied; surface a warning in the thread).
-- [ ] Tests: each of the four reconcile outcomes for title and for labels; lost-update race (queue order github-then-discord); no rename ping-pong.
+- [x] `Link.snap` (title, managed labels, overflow, state) and pure `planMetadata` in `src/bridge/reconcile.ts`. It runs once, in `engine.github()` (`metadata()`), which every Discord task already ends in; both sides are read at run time. A missing snapshot means GitHub wins once, so links need no seeding (a Discord-origin issue is created with the same tag-to-label pairing, so both sides start equal).
+- [x] `ThreadUpdate` listener enqueues the linked issue's `github` task when the name or applied tags change.
+- [x] `Platforms.updateIssue` (App write token, bridge mode only; refusals are held under `meta:N` and never fail the job), `threadMeta`, `managedTags`, `applyMeta` (forced re-read, delta, only changed fields, archived state restored), `applyArchive` (archive on close, unarchive only on reopen vs the snapshot). `updatePost` is gone.
+- [x] Title: only this issue's `#N ` prefix is stripped; names truncated to 100 compare equal. Managed pairing: explicit `labels` setting, else case-insensitive name; unmanaged tags pass through. Five-tag cap: tags already applied are kept, labels that do not fit are kept as `overflow` and not read as removals. No warning message in the thread (decided against: it would add bot noise on every overflow). Renames: at most two per thread per ten minutes; a deferred rename keeps the old snapshot title so it is retried.
+- [x] Tests: `reconcile.test.ts` (all outcomes for title and labels, truncation, prefix restore without ping-pong, overflow, user mode, missing snapshot, pairing), engine tests (stale queued GitHub task loses nothing, own edits are quiet, user mode reverts, held write retried, inactivity archive kept), adapter tests (delta, forced re-read, archive restore, rename deferral).
 - Acceptance: rename a thread -> issue title changes; add/remove a managed tag -> label changes; same in reverse; simultaneous edits resolve with GitHub winning.
 
 ### Phase 3: Close tags (D5)

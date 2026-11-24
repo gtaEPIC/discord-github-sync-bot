@@ -135,6 +135,18 @@ export class Runtime {
           thread: thread.id,
         }),
       );
+      // Title and tag edits reconcile through the linked issue's GitHub task (reads both sides).
+      client.on(Events.ThreadUpdate, (old, thread) => {
+        const same =
+          old.name === thread.name &&
+          old.appliedTags?.length === thread.appliedTags.length &&
+          thread.appliedTags.every((t) => old.appliedTags.includes(t));
+        if (same) return;
+        const worker = route(thread.id, thread.parentId);
+        const link = worker?.store.thread(thread.id);
+        if (link && !link.disabled)
+          enqueue(worker, { type: "github", issue: link.issue });
+      });
       client.on(Events.ThreadDelete, (thread) =>
         enqueue(route(thread.id, thread.parentId), {
           type: "unlink",
@@ -306,7 +318,9 @@ export class Runtime {
         try {
           await api.initialize();
           worker.api = api;
-          worker.engine = new Engine(worker.store, api, mapping.backfill);
+          worker.engine = new Engine(worker.store, api, mapping.backfill, {
+            discordWrites: config.writeMode === "bridge",
+          });
           guilds.add(api.guildId);
           worker.store.enqueue({ type: "scan" }, randomUUID());
         } catch (error) {

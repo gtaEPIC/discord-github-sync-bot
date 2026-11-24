@@ -45,6 +45,16 @@ describe("bridge settings", () => {
     expect(() => parseBridgeConfig([])).toThrow(ConfigError);
     expect(() => parseBridgeConfig("bridge")).toThrow(ConfigError);
   });
+  it("validates tag-to-label mappings", () => {
+    expect(parseBridgeConfig({ labels: { Feature: "enhancement" } })).toEqual({
+      labels: { Feature: "enhancement" },
+    });
+    expect(() => parseBridgeConfig({ labels: { Feature: 3 } })).toThrow(
+      ConfigError,
+    );
+    expect(() => parseBridgeConfig({ labels: ["bug"] })).toThrow(ConfigError);
+    expect(resolveConfig({}).labels).toEqual({});
+  });
   it("never resolves corrupt stored settings to bridge mode", () => {
     expect(resolveConfig({ writeMode: "bridge", typo: true }).writeMode).toBe(
       "user",

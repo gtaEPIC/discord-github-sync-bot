@@ -139,8 +139,11 @@ The forum is a publishing boundary: human-created posts and replies are eligible
 - New GitHub issues create forum posts. Human-created forum posts create GitHub issues.
 - Replies sync both ways with attribution and source links; Discord bot/webhook messages are excluded.
 - Edit the original reply on its source platform to update its mirror.
-- GitHub title, body, labels, lock state, and open/closed state update the forum thread and bot-owned summary. Matching label names become forum tags, up to five.
-- For Discord-origin issues, editing the original starter updates its GitHub body. Other metadata is managed on GitHub after creation; later Discord title/tag changes do not change GitHub.
+- GitHub title, body, labels, lock state, and open/closed state update the forum thread and bot-owned summary.
+- **Managed tags** (fork): a forum tag is paired with the repository label of the same name (case-insensitive) or with the label named in the mapping's `labels` setting, for example `{ "labels": { "Feature": "enhancement" } }`. Only managed tags and labels are synced; other tags and labels are never touched, and labels are never created.
+- **Title and tag sync** (fork) is a three-way reconcile against the last agreed state. A change on one side is copied to the other; if both sides changed the same field, GitHub wins. In **bridge** mode, renaming a thread or changing its managed tags updates the issue (the `#N ` prefix is kept on Discord). In **user** mode, Discord title/tag edits are reverted to GitHub's values.
+- Discord shows at most five tags per post: labels that do not fit are kept on GitHub and shown when a slot frees up, and tags already on the post are never dropped for space. Discord allows two renames per thread per ten minutes; extra renames wait for a later scan.
+- For Discord-origin issues, editing the original starter updates its GitHub body.
 - Long GitHub content is split across messages. Shortening content leaves placeholders in obsolete parts.
 - Deleted source comments/messages become deletion notices in their mirrors. Deleting an entire thread/issue disables its mapping; it does not delete its counterpart or recreate the removed object.
 - Outbound Discord messages disable mentions, including edits.

@@ -13,12 +13,19 @@ export interface BridgeConfig {
   allowRoles: string[];
   /** Bridge mode only: per-Discord-user limits on new issues and new comments, per rolling hour. 0 disables a limit. */
   rateLimit: { issuesPerHour: number; commentsPerHour: number };
+  /**
+   * Forum tag name -> repository label name, for tags whose names differ from their labels
+   * (for example "Bug" -> "bug" is already matched case-insensitively). Tags with no matching
+   * label are left alone.
+   */
+  labels: Record<string, string>;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = Object.freeze({
   writeMode: "user",
   allowRoles: [],
   rateLimit: Object.freeze({ issuesPerHour: 5, commentsPerHour: 60 }),
+  labels: Object.freeze({}),
 }) as BridgeConfig;
 
 export class ConfigError extends Error {
@@ -28,7 +35,7 @@ export class ConfigError extends Error {
   }
 }
 
-const KEYS = ["writeMode", "allowRoles", "rateLimit"];
+const KEYS = ["writeMode", "allowRoles", "rateLimit", "labels"];
 const RATE_KEYS = ["issuesPerHour", "commentsPerHour"];
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -86,6 +93,25 @@ export function parseBridgeConfig(value: unknown): Partial<BridgeConfig> {
       result.rateLimit = rate as BridgeConfig["rateLimit"];
     }
   }
+  if (value.labels !== undefined) {
+    const entries = isObject(value.labels) ? Object.entries(value.labels) : [];
+    if (
+      !isObject(value.labels) ||
+      entries.length > 20 ||
+      entries.some(
+        ([tag, label]) =>
+          !tag.trim() ||
+          tag.length > 20 ||
+          typeof label !== "string" ||
+          !label.trim() ||
+          label.length > 50,
+      )
+    )
+      problems.push(
+        "labels must map up to 20 forum tag names (max 20 characters) to label names (max 50 characters).",
+      );
+    else result.labels = Object.fromEntries(entries) as Record<string, string>;
+  }
   if (problems.length) throw new ConfigError(problems);
   return result;
 }
@@ -102,5 +128,6 @@ export function resolveConfig(stored: unknown): BridgeConfig {
     writeMode: parsed.writeMode ?? DEFAULT_CONFIG.writeMode,
     allowRoles: parsed.allowRoles ?? [],
     rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...parsed.rateLimit },
+    labels: parsed.labels ?? {},
   };
 }

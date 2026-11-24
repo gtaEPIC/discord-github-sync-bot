@@ -1,7 +1,6 @@
 import { Client, Collection } from "discord.js";
 import { describe, expect, it, vi } from "vitest";
 import { LivePlatforms } from "./platforms";
-import { Issue, Link } from "./types";
 
 function setup() {
   const client = { user: { id: "bot" }, channels: { fetch: vi.fn() } };
@@ -46,44 +45,65 @@ function channel(id = "thread") {
   };
   return value;
 }
-const issue: Issue = {
-  number: 42,
-  title: "Title",
-  body: "body",
-  author: "alice",
-  url: "https://github.com/owner/repo/issues/42",
-  state: "open",
-  locked: false,
-  labels: [],
-  createdAt: "2026-01-01T00:00:00Z",
-};
-const link: Link = {
-  issue: 42,
-  thread: "thread",
-  starter: "starter",
-  origin: "github",
-};
-
 describe("Discord adapter", () => {
   it("keeps an inactive open issue archived instead of reopening it every scan", async () => {
     const { api, client } = setup();
     const thread = channel();
     thread.archived = true;
     client.channels.fetch.mockResolvedValue(thread);
-    await api.updatePost(link, issue);
+    expect(await api.applyMeta(thread.id, {})).toEqual({
+      overflow: [],
+      renameDeferred: false,
+    });
+    await api.applyArchive(thread.id, false, false);
     expect(thread.setArchived).not.toHaveBeenCalled();
     expect(thread.edit).not.toHaveBeenCalled();
+    await api.applyArchive(thread.id, false, true);
+    expect(thread.setArchived.mock.calls).toEqual([[false]]);
   });
-  it("applies GitHub metadata before restoring the closed archived state", async () => {
+  it("edits an archived thread and restores the archive, sending only changed fields", async () => {
     const { api, client } = setup();
     const thread = channel();
     thread.archived = true;
     client.channels.fetch.mockResolvedValue(thread);
-    await api.updatePost(link, { ...issue, title: "Changed", state: "closed" });
+    await api.applyMeta(thread.id, { name: "#42 Changed", locked: false });
     expect(thread.setArchived.mock.calls).toEqual([[false], [true]]);
-    expect(thread.edit).toHaveBeenCalledWith(
-      expect.objectContaining({ name: "#42 Changed" }),
-    );
+    expect(thread.edit).toHaveBeenCalledWith({ name: "#42 Changed" });
+    // Metadata is re-read with force right before writing.
+    expect(client.channels.fetch).toHaveBeenCalledWith(thread.id, {
+      force: true,
+    });
+    await api.applyArchive(thread.id, true, false);
+    expect(thread.setArchived).toHaveBeenCalledTimes(2);
+  });
+  it("applies tag changes as a delta, keeps other tags, and reports tags that do not fit", async () => {
+    const { api, client } = setup();
+    const thread = channel();
+    thread.appliedTags = ["a", "b", "c", "d"];
+    client.channels.fetch.mockResolvedValue(thread);
+    expect(
+      await api.applyMeta(thread.id, {
+        addTags: ["e", "f"],
+        removeTags: ["missing"],
+      }),
+    ).toEqual({ overflow: ["f"], renameDeferred: false });
+    expect(thread.edit).toHaveBeenCalledWith({
+      appliedTags: ["a", "b", "c", "d", "e"],
+    });
+  });
+  it("defers a third rename within ten minutes instead of waiting on Discord's rate limit", async () => {
+    const { api, client } = setup();
+    const thread = channel();
+    client.channels.fetch.mockResolvedValue(thread);
+    for (const name of ["#42 One", "#42 Two"])
+      expect((await api.applyMeta(thread.id, { name })).renameDeferred).toBe(
+        false,
+      );
+    expect(
+      (await api.applyMeta(thread.id, { name: "#42 Three", addTags: ["x"] }))
+        .renameDeferred,
+    ).toBe(true);
+    expect(thread.edit).toHaveBeenLastCalledWith({ appliedTags: ["x"] });
   });
   it("disables mentions for both sends and edits and uses Discord nonce deduplication", async () => {
     const { api, client } = setup();

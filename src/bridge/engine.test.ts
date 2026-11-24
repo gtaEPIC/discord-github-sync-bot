@@ -3,10 +3,20 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WriteBlocked } from "./authorship";
-import { Engine } from "./engine";
+import { Engine, EngineOptions } from "./engine";
 import { Store } from "./database";
 import { chunks, issueMarker, issueSummary, messageMarker } from "./content";
-import { Comment, Issue, Link, Message, Platforms, Post } from "./types";
+import {
+  Comment,
+  Issue,
+  IssueChange,
+  Message,
+  MetaChange,
+  Platforms,
+  Post,
+  ThreadMeta,
+} from "./types";
+import { ManagedTag } from "./reconcile";
 
 class Fake implements Platforms {
   gh: Issue[] = [];
@@ -58,14 +68,54 @@ class Fake implements Platforms {
     if (!post) throw Object.assign(new Error("Not found"), { status: 404 });
     return structuredClone(post);
   });
-  createPost = vi.fn(async (issue: Issue) =>
-    this.addPost({
+  createPost = vi.fn(async (issue: Issue) => {
+    const post = this.addPost({
       bot: true,
       own: true,
       body: chunks(issueSummary(issue), issue.url)[0],
-    }),
+    });
+    const name = `#${issue.number} ${issue.title}`.slice(0, 100);
+    post.title = name;
+    this.meta.get(post.id)!.name = name;
+    this.meta.get(post.id)!.tags = this.managed
+      .filter((m) => issue.labels.includes(m.label))
+      .map((m) => m.id);
+    return structuredClone(post);
+  });
+  managed: ManagedTag[] = [];
+  meta = new Map<string, ThreadMeta>();
+  managedTags = vi.fn(async () => structuredClone(this.managed));
+  threadMeta = vi.fn(async (thread: string) => {
+    const meta = this.meta.get(thread);
+    if (!meta) throw Object.assign(new Error("Not found"), { status: 404 });
+    return structuredClone(meta);
+  });
+  applyMeta = vi.fn(async (thread: string, change: MetaChange) => {
+    const meta = this.meta.get(thread)!;
+    if (change.name !== undefined) meta.name = change.name;
+    if (change.locked !== undefined) meta.locked = change.locked;
+    meta.tags = meta.tags.filter((t) => !change.removeTags?.includes(t));
+    const overflow: string[] = [];
+    for (const tag of change.addTags ?? [])
+      if (meta.tags.length < 5) meta.tags.push(tag);
+      else overflow.push(tag);
+    return { overflow, renameDeferred: false };
+  });
+  applyArchive = vi.fn(
+    async (thread: string, closed: boolean, reopened: boolean) => {
+      const meta = this.meta.get(thread)!;
+      if (closed) meta.archived = true;
+      else if (reopened) meta.archived = false;
+    },
   );
-  updatePost = vi.fn(async (_link: Link, _issue: Issue) => {});
+  updateIssue = vi.fn(async (number: number, change: IssueChange) => {
+    const issue = this.gh.find((i) => i.number === number)!;
+    if (change.title !== undefined) issue.title = change.title;
+    issue.labels = [
+      ...issue.labels.filter((l) => !change.removeLabels?.includes(l)),
+      ...(change.addLabels ?? []),
+    ];
+  });
   messages = vi.fn(async (thread: string) =>
     structuredClone(this.messagesByThread.get(thread) ?? []),
   );
@@ -115,6 +165,12 @@ class Fake implements Platforms {
     };
     this.dc.push(post);
     this.messagesByThread.set(id, [starter]);
+    this.meta.set(id, {
+      name: post.title,
+      tags: [],
+      archived: false,
+      locked: false,
+    });
     return post;
   }
   addMessage(thread: string, body: string, bot = false) {
@@ -149,11 +205,11 @@ class Fake implements Platforms {
 
 const stores: Store[] = [];
 const dirs: string[] = [];
-function setup() {
+function setup(options: EngineOptions = {}) {
   const store = new Store(":memory:", "test");
   stores.push(store);
   const api = new Fake();
-  return { store, api, engine: new Engine(store, api, false) };
+  return { store, api, engine: new Engine(store, api, false, options) };
 }
 afterEach(() => {
   for (const s of stores.splice(0)) s.close();
@@ -353,7 +409,7 @@ describe("durable bridge", () => {
     const { engine, api, store } = setup();
     const issue = api.addIssue();
     await engine.github(issue.number);
-    api.updatePost.mockRejectedValueOnce(
+    api.applyMeta.mockRejectedValueOnce(
       Object.assign(new Error("Missing permissions"), { status: 403 }),
     );
     await expect(engine.github(issue.number)).rejects.toThrow(
@@ -571,5 +627,116 @@ describe("durable bridge", () => {
     expect(tasks).toContainEqual({ type: "github", issue: recent.number });
     expect(tasks).not.toContainEqual({ type: "github", issue: old.number });
     expect(tasks).not.toContainEqual({ type: "github", issue: closed.number });
+  });
+});
+
+describe("title and tag reconcile", () => {
+  const managed: ManagedTag[] = [
+    { id: "t-bug", name: "Bug", label: "bug" },
+    { id: "t-ui", name: "UI", label: "ui" },
+  ];
+  async function linked(options: EngineOptions) {
+    const ctx = setup(options);
+    ctx.api.managed = managed;
+    const issue = ctx.api.addIssue({ title: "Train stuck", labels: ["bug"] });
+    await ctx.engine.github(issue.number);
+    const thread = ctx.store.link(issue.number)!.thread;
+    return { ...ctx, issue, thread, meta: ctx.api.meta.get(thread)! };
+  }
+  it("sends Discord renames and tag edits to GitHub in bridge mode, even from a stale queued GitHub task", async () => {
+    const { engine, api, issue, meta, store } = await linked({
+      discordWrites: true,
+    });
+    expect(meta).toMatchObject({
+      name: `#${issue.number} Train stuck`,
+      tags: ["t-bug"],
+    });
+    // The thread is edited on Discord; a GitHub task queued earlier runs first.
+    meta.name = `#${issue.number} Doors broken`;
+    meta.tags = ["t-bug", "t-ui", "unmanaged"];
+    await engine.github(issue.number);
+    expect(api.updateIssue).toHaveBeenCalledWith(issue.number, {
+      title: "Doors broken",
+      addLabels: ["ui"],
+      removeLabels: [],
+    });
+    expect(api.gh[0]).toMatchObject({
+      title: "Doors broken",
+      labels: ["bug", "ui"],
+    });
+    expect(meta.tags).toEqual(["t-bug", "t-ui", "unmanaged"]);
+    expect(store.link(issue.number)!.snap).toMatchObject({
+      title: "Doors broken",
+      labels: ["bug", "ui"],
+    });
+    // Our own writes come back as events: nothing further changes.
+    api.updateIssue.mockClear();
+    api.applyMeta.mockClear();
+    await engine.github(issue.number);
+    expect(api.updateIssue).not.toHaveBeenCalled();
+    expect(api.applyMeta).toHaveBeenCalledWith(expect.any(String), {
+      name: undefined,
+      addTags: [],
+      removeTags: [],
+      locked: undefined,
+    });
+    // The summary reflects the reconciled title and labels.
+    const summary = store.mirror(`summary:${issue.number}`)!;
+    expect(
+      api.messagesByThread
+        .get(store.link(issue.number)!.thread)!
+        .find((m) => m.id === summary.ids[0])!.body,
+    ).toContain("Labels: bug, ui");
+  });
+  it("applies GitHub title and label changes to Discord and lets GitHub win a conflict", async () => {
+    const { engine, api, issue, meta } = await linked({ discordWrites: true });
+    api.gh[0].title = "From GitHub";
+    api.gh[0].labels = ["ui"];
+    meta.name = `#${issue.number} From Discord`;
+    await engine.github(issue.number);
+    expect(api.updateIssue).not.toHaveBeenCalled();
+    expect(meta).toMatchObject({
+      name: `#${issue.number} From GitHub`,
+      tags: ["t-ui"],
+    });
+  });
+  it("reverts Discord edits in user mode without writing GitHub", async () => {
+    const { engine, api, issue, meta } = await linked({});
+    meta.name = `#${issue.number} Doors broken`;
+    meta.tags = ["t-ui", "unmanaged"];
+    await engine.github(issue.number);
+    expect(api.updateIssue).not.toHaveBeenCalled();
+    expect(meta.name).toBe(`#${issue.number} Train stuck`);
+    // Managed tags follow GitHub; unmanaged tags are left alone.
+    expect(meta.tags.sort()).toEqual(["t-bug", "unmanaged"]);
+  });
+  it("holds refused GitHub writes without failing the job or reverting Discord, then retries", async () => {
+    const { engine, api, issue, meta, store } = await linked({
+      discordWrites: true,
+    });
+    meta.tags = [];
+    api.updateIssue.mockRejectedValueOnce(
+      new WriteBlocked(undefined, "permission", "no access"),
+    );
+    await engine.github(issue.number);
+    expect(store.health().blocked).toBe(1);
+    expect(meta.tags).toEqual([]);
+    expect(store.link(issue.number)!.snap!.labels).toEqual(["bug"]);
+    await engine.github(issue.number);
+    expect(store.health().blocked).toBe(0);
+    expect(api.gh[0].labels).toEqual([]);
+  });
+  it("keeps an inactivity-archived open thread archived and unarchives only on reopen", async () => {
+    const { engine, api, issue, meta } = await linked({ discordWrites: true });
+    meta.archived = true;
+    await engine.github(issue.number);
+    expect(meta.archived).toBe(true);
+    expect(api.state).not.toHaveBeenCalled();
+    api.gh[0].state = "closed";
+    await engine.github(issue.number);
+    expect(meta.archived).toBe(true);
+    api.gh[0].state = "open";
+    await engine.github(issue.number);
+    expect(meta.archived).toBe(false);
   });
 });

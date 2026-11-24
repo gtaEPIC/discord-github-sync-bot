@@ -1,4 +1,5 @@
 import { Relay, Writer } from "./authorship";
+import { ManagedTag, Snapshot } from "./reconcile";
 export interface Issue {
   number: number;
   title: string;
@@ -49,6 +50,27 @@ export interface Link {
   starter: string;
   disabled?: boolean;
   writer?: Writer;
+  /** Last agreed metadata (title, managed labels, state); see reconcile.ts. */
+  snap?: Snapshot;
+}
+/** A forum thread's metadata, read without fetching messages. */
+export interface ThreadMeta {
+  name: string;
+  /** Applied tag ids. */
+  tags: string[];
+  archived: boolean;
+  locked: boolean;
+}
+export interface MetaChange {
+  name?: string;
+  addTags?: string[];
+  removeTags?: string[];
+  locked?: boolean;
+}
+export interface IssueChange {
+  title?: string;
+  addLabels?: string[];
+  removeLabels?: string[];
 }
 export interface Mirror {
   key: string;
@@ -96,7 +118,25 @@ export interface Platforms {
   posts(): Promise<Post[]>;
   getPost(thread: string): Promise<Post>;
   createPost(issue: Issue): Promise<Post>;
-  updatePost(link: Link, issue: Issue): Promise<void>;
+  /** Forum tags paired with repository labels. */
+  managedTags(): Promise<ManagedTag[]>;
+  threadMeta(thread: string): Promise<ThreadMeta>;
+  /**
+   * Apply only the given changes, as a delta against the thread's current tags.
+   * Returns tag ids that did not fit and whether a rename had to wait for Discord's rename limit.
+   */
+  applyMeta(
+    thread: string,
+    change: MetaChange,
+  ): Promise<{ overflow: string[]; renameDeferred: boolean }>;
+  /** Archive a closed issue's thread; unarchive only on a reopen. Never changes GitHub. */
+  applyArchive(
+    thread: string,
+    closed: boolean,
+    reopened: boolean,
+  ): Promise<void>;
+  /** Discord-originated title/label change, written by the GitHub App (bridge mode only). */
+  updateIssue(number: number, change: IssueChange): Promise<void>;
   messages(thread: string): Promise<Message[]>;
   send(thread: string, body: string, nonce: string): Promise<string>;
   edit(thread: string, id: string, body: string): Promise<void>;

@@ -9,8 +9,18 @@ import {
 import { Authorship, Writer, WriteBlocked } from "./authorship";
 import { uploadToR2 } from "../r2";
 import { chunks, issueSummary, missing, sourceBody } from "./content";
-import { Comment, Issue, Link, Message, Platforms, Post } from "./types";
+import {
+  Comment,
+  Issue,
+  IssueChange,
+  Message,
+  MetaChange,
+  Platforms,
+  Post,
+  ThreadMeta,
+} from "./types";
 import { BridgeConfig, DEFAULT_CONFIG } from "./config";
+import { MAX_TAGS, ManagedTag, managedTags, threadName } from "./reconcile";
 
 type Options = {
   owner: string;
@@ -314,30 +324,94 @@ export class LivePlatforms implements Platforms {
       if (key) recent.push(Date.now());
       return result;
     } catch (error) {
-      if (error instanceof WriteBlocked) throw error;
-      const failure = error as {
-        status?: number;
-        response?: { headers?: Record<string, string> };
-      };
-      const headers = failure.response?.headers;
-      // Rate limits are retried by the queue with GitHub's delay; they are not permission problems.
-      if (
-        headers?.["retry-after"] ||
-        headers?.["x-ratelimit-remaining"] === "0"
-      )
-        throw error;
-      if (failure.status === 401) {
-        this.options.invalidateWriteToken?.();
-        throw error;
-      }
-      if (failure.status === 403 || failure.status === 404)
-        throw new WriteBlocked(
-          discordId,
-          "permission",
-          "The GitHub App cannot write issues in this repository. Check that it has Issues: read and write and is installed on the repository. This change has not been sent.",
-        );
-      throw error;
+      throw this.writeFailure(error, discordId);
     }
+  }
+  /** Map an App write failure: rate limits and auth errors go back to the queue; access problems are held. */
+  private writeFailure(error: unknown, discordId: string | undefined) {
+    if (error instanceof WriteBlocked) return error;
+    const failure = error as {
+      status?: number;
+      response?: { headers?: Record<string, string> };
+    };
+    const headers = failure.response?.headers;
+    // Rate limits are retried by the queue with GitHub's delay; they are not permission problems.
+    if (headers?.["retry-after"] || headers?.["x-ratelimit-remaining"] === "0")
+      return error;
+    if (failure.status === 401) {
+      this.options.invalidateWriteToken?.();
+      return error;
+    }
+    if (failure.status === 403 || failure.status === 404)
+      return new WriteBlocked(
+        discordId,
+        "permission",
+        "The GitHub App cannot write issues in this repository. Check that it has Issues: read and write and is installed on the repository. This change has not been sent.",
+      );
+    return error;
+  }
+  /** Title/label changes made on Discord. Bridge mode only; there is no Discord actor to attribute. */
+  async updateIssue(number: number, change: IssueChange) {
+    if (!this.bridgeMode || !this.options.writeToken)
+      throw new WriteBlocked(
+        undefined,
+        "permission",
+        "Discord title and tag changes reach GitHub only in bridge write mode.",
+      );
+    const api = new Octokit({
+      auth: await this.options.writeToken(),
+      request: { timeout: 30_000 },
+    });
+    try {
+      if (change.title !== undefined)
+        await api.issues.update({
+          ...this.repo,
+          issue_number: number,
+          title: change.title,
+        });
+      if (change.addLabels?.length)
+        await api.issues.addLabels({
+          ...this.repo,
+          issue_number: number,
+          labels: change.addLabels,
+        });
+      for (const name of change.removeLabels ?? [])
+        try {
+          await api.issues.removeLabel({
+            ...this.repo,
+            issue_number: number,
+            name,
+          });
+        } catch (error) {
+          // Already removed on GitHub: the goal is met.
+          if ((error as { status?: number }).status !== 404) throw error;
+        }
+    } catch (error) {
+      throw this.writeFailure(error, undefined);
+    }
+  }
+  private labelCache?: { names: string[]; until: number };
+  private async repoLabels(): Promise<string[]> {
+    if (this.labelCache && this.labelCache.until > Date.now())
+      return this.labelCache.names;
+    const names = (
+      await this.github.paginate(this.github.issues.listLabelsForRepo, {
+        ...this.repo,
+        per_page: 100,
+      })
+    ).map((label) => label.name);
+    this.labelCache = { names, until: Date.now() + 5 * 60_000 };
+    return names;
+  }
+  async managedTags(): Promise<ManagedTag[]> {
+    return managedTags(
+      (this.forum?.availableTags ?? []).map((t) => ({
+        id: t.id,
+        name: t.name,
+      })),
+      await this.repoLabels(),
+      this.config.labels,
+    );
   }
   private async memberRoles(discordId: string): Promise<string[]> {
     const cached = this.roleCache.get(discordId);
@@ -387,13 +461,11 @@ export class LivePlatforms implements Platforms {
       post.starter.authorId,
       undefined,
       async (api, writer) => {
-        const available = await api.paginate(api.issues.listLabelsForRepo, {
-          ...this.repo,
-          per_page: 100,
-        });
-        const labels = post.tags.filter((tag) =>
-          available.some((label) => label.name === tag),
-        );
+        // Same tag -> label pairing as the ongoing reconcile.
+        const managed = post.tags.length ? await this.managedTags() : [];
+        const labels = managed
+          .filter((m) => post.tags.includes(m.name))
+          .map((m) => m.label);
         const { data } = await api.issues.create({
           ...this.repo,
           title: post.title,
@@ -515,8 +587,11 @@ export class LivePlatforms implements Platforms {
       allowedMentions: { parse: [], users: [source.authorId] },
     });
   }
-  private async channel(id: string): Promise<ThreadChannel> {
-    const channel = await this.client.channels.fetch(id);
+  private async channel(id: string, force = false): Promise<ThreadChannel> {
+    const channel = await this.client.channels.fetch(
+      id,
+      force ? { force: true } : undefined,
+    );
     if (!channel?.isThread() || channel.parentId !== this.options.forum) {
       throw Object.assign(
         new Error("Thread is missing or outside the configured forum."),
@@ -631,9 +706,13 @@ export class LivePlatforms implements Platforms {
     return posts;
   }
   async createPost(issue: Issue) {
+    const tags = (await this.managedTags())
+      .filter((m) => issue.labels.includes(m.label))
+      .slice(0, MAX_TAGS)
+      .map((m) => m.id);
     const post = await this.forum.threads.create({
-      name: `#${issue.number} ${issue.title}`.slice(0, 100),
-      appliedTags: this.tags(issue),
+      name: threadName(issue.number, issue.title),
+      appliedTags: tags,
       message: {
         content: chunks(issueSummary(issue), issue.url)[0],
         allowedMentions: { parse: [] },
@@ -641,30 +720,61 @@ export class LivePlatforms implements Platforms {
     });
     return this.post(post);
   }
-  private tags(issue: Issue) {
-    // Discord allows at most five forum tags per post.
-    return this.forum.availableTags
-      .filter((t) => issue.labels.includes(t.name))
-      .slice(0, 5)
-      .map((t) => t.id);
+  async threadMeta(thread: string): Promise<ThreadMeta> {
+    const channel = await this.channel(thread);
+    return {
+      name: channel.name,
+      tags: [...channel.appliedTags],
+      archived: channel.archived ?? false,
+      locked: channel.locked ?? false,
+    };
   }
-  async updatePost(link: Link, issue: Issue) {
-    const channel = await this.channel(link.thread);
-    const name = `#${issue.number} ${issue.title}`.slice(0, 100);
-    const tags = this.tags(issue);
-    const metadataChanged =
-      channel.name !== name ||
-      channel.locked !== issue.locked ||
-      JSON.stringify([...channel.appliedTags].sort()) !==
-        JSON.stringify([...tags].sort());
-    if (metadataChanged) {
-      if (channel.archived) await channel.setArchived(false);
-      await channel.edit({ name, appliedTags: tags, locked: issue.locked });
+  /** Discord allows two thread renames per ten minutes; a third would stall the whole queue. */
+  private renames = new Map<string, number[]>();
+  async applyMeta(thread: string, change: MetaChange) {
+    // Re-read right before writing and apply a delta, so a concurrent Discord edit survives.
+    const channel = await this.channel(thread, true);
+    const edit: { name?: string; appliedTags?: string[]; locked?: boolean } =
+      {};
+    let renameDeferred = false;
+    if (change.name !== undefined && change.name !== channel.name) {
+      const recent = (this.renames.get(thread) ?? []).filter(
+        (t) => t > Date.now() - 10 * 60_000,
+      );
+      this.renames.set(thread, recent);
+      if (recent.length < 2) edit.name = change.name;
+      else renameDeferred = true;
     }
-    if (issue.state === "closed" && !channel.archived)
-      await channel.setArchived(true);
-    // Open issues may be archived from inactivity; only an actual reopen should unarchive.
-    if (issue.state === "open" && channel.archived && metadataChanged)
+    const current = [...channel.appliedTags];
+    const next = current.filter((t) => !change.removeTags?.includes(t));
+    const overflow: string[] = [];
+    for (const tag of change.addTags ?? []) {
+      if (next.includes(tag)) continue;
+      if (next.length < MAX_TAGS) next.push(tag);
+      else overflow.push(tag);
+    }
+    if (
+      next.length !== current.length ||
+      next.some((t) => !current.includes(t))
+    )
+      edit.appliedTags = next;
+    if (change.locked !== undefined && change.locked !== channel.locked)
+      edit.locked = change.locked;
+    if (Object.keys(edit).length) {
+      // Archived threads must be reopened to edit; restore the archive afterwards.
+      const archived = channel.archived;
+      if (archived) await channel.setArchived(false);
+      await channel.edit(edit);
+      if (edit.name) this.renames.get(thread)!.push(Date.now());
+      if (archived) await channel.setArchived(true);
+    }
+    return { overflow, renameDeferred };
+  }
+  async applyArchive(thread: string, closed: boolean, reopened: boolean) {
+    const channel = await this.channel(thread);
+    if (closed && !channel.archived) await channel.setArchived(true);
+    // Open issues may be archived from inactivity; only an actual reopen unarchives.
+    if (!closed && reopened && channel.archived)
       await channel.setArchived(false);
   }
   async messages(thread: string): Promise<Message[]> {

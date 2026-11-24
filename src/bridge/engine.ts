@@ -10,6 +10,12 @@ import {
   sourceBody,
 } from "./content";
 import { Issue, Link, Message, Platforms, Task } from "./types";
+import { planMetadata } from "./reconcile";
+
+export interface EngineOptions {
+  /** Bridge mode: Discord title and tag changes are written to GitHub. Otherwise GitHub wins. */
+  discordWrites?: boolean;
+}
 
 /** One instance and one consumer per database. All remote mutations pass through this engine. */
 export class Engine {
@@ -17,6 +23,7 @@ export class Engine {
     readonly store: Store,
     readonly api: Platforms,
     readonly backfill: boolean,
+    readonly options: EngineOptions = {},
   ) {}
 
   async run(task: Task): Promise<void> {
@@ -133,7 +140,7 @@ export class Engine {
       this.store.saveLink(link);
     }
     try {
-      await this.api.updatePost(link, issue);
+      const { reopened } = await this.metadata(link, issue);
       const history = await this.api.messages(link.thread);
       // A bot-owned summary works for human-created starters too: never edit another user's message.
       await this.render(
@@ -184,8 +191,12 @@ export class Engine {
           );
         }
       }
-      // Posting a comment can unarchive a closed thread, so apply state last as well.
-      await this.api.updatePost(link, issue);
+      // Posting a comment can unarchive a closed thread, so apply state last.
+      await this.api.applyArchive(
+        link.thread,
+        issue.state === "closed",
+        reopened,
+      );
     } catch (error) {
       if (missing(error)) {
         // Only an actually missing thread disables the mapping; missing mirror messages are repaired in render().
@@ -200,6 +211,73 @@ export class Engine {
       }
       throw error;
     }
+  }
+
+  /**
+   * Three-way reconcile of title and managed labels (see reconcile.ts). Both sides are read
+   * now, so a stale queued task cannot undo a newer edit. GitHub writes that are refused are
+   * held under `meta:N`; they never fail the job (a failed job would block later scans).
+   */
+  private async metadata(link: Link, issue: Issue) {
+    const previous = link.snap;
+    const reopened = previous?.state === "closed" && issue.state === "open";
+    const [meta, managed] = await Promise.all([
+      this.api.threadMeta(link.thread),
+      this.api.managedTags(),
+    ]);
+    const plan = planMetadata({
+      number: issue.number,
+      github: { title: issue.title, labels: issue.labels },
+      discord: { name: meta.name, tags: meta.tags },
+      managed,
+      snap: previous,
+      discordWrites: Boolean(this.options.discordWrites),
+    });
+    const { github } = plan;
+    const key = `meta:${issue.number}`;
+    if (
+      github.title !== undefined ||
+      github.addLabels.length ||
+      github.removeLabels.length
+    ) {
+      try {
+        await this.api.updateIssue(issue.number, github);
+      } catch (error) {
+        // Leave Discord and the snapshot as they are, so the change is retried on the next scan.
+        if (await this.hold(error, key, undefined, link.thread))
+          return { reopened };
+        throw error;
+      }
+    }
+    this.store.unblock(key);
+    const applied = await this.api.applyMeta(link.thread, {
+      name: plan.discord.name,
+      addTags: plan.discord.addTags,
+      removeTags: plan.discord.removeTags,
+      locked: issue.locked !== meta.locked ? issue.locked : undefined,
+    });
+    issue.title = plan.title;
+    issue.labels = [
+      ...issue.labels.filter((l) => !github.removeLabels.includes(l)),
+      ...github.addLabels,
+    ];
+    const overflow = new Set(plan.overflow);
+    for (const id of applied.overflow) {
+      const label = managed.find((m) => m.id === id)?.label;
+      if (label) overflow.add(label);
+    }
+    link.snap = {
+      // A rename that had to wait keeps the old title, so the next run retries it.
+      title:
+        applied.renameDeferred && plan.discord.name !== undefined
+          ? previous?.title
+          : plan.title,
+      labels: plan.labels,
+      overflow: [...overflow],
+      state: issue.state,
+    };
+    this.store.saveLink(link);
+    return { reopened };
   }
 
   private async render(
