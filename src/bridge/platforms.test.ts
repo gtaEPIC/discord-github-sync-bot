@@ -226,11 +226,24 @@ describe("timeline reader", () => {
       commit_url:
         "https://api.github.com/repos/fork/repo/commits/1234567abcdef",
     },
-    { event: "closed", id: 93, commit_id: null },
+    {
+      event: "closed",
+      id: 93,
+      node_id: "CE_93",
+      commit_id: null,
+      state_reason: "duplicate",
+      actor: { login: "maintainer", id: 5 },
+    },
     { event: "labeled", id: 94 },
+    { event: "labeled", id: 95, label: { name: "bug" }, actor: { id: 999 } },
+    { event: "renamed", id: 96, rename: { from: "Old", to: "New" } },
+    { event: "project_v2_item_status_changed", id: 97, node_id: "PVTISC_97" },
+    { event: "subscribed", id: 98 },
   ];
   it("keeps cross-references and commit references, keyed for deduplication", async () => {
     const { api } = setup();
+    // Changes the bridge's own App made (actor 999) came from Discord: not shown.
+    Reflect.set(api, "botId", "999");
     const list = vi.fn(async () => ({
       data: events,
       headers: { etag: 'W/"one"' },
@@ -262,7 +275,114 @@ describe("timeline reader", () => {
         kind: "closed",
         label: "fork/repo@1234567",
       }),
+      expect.objectContaining({
+        key: "93",
+        kind: "closed",
+        reason: "duplicate",
+        node: "CE_93",
+        actor: "maintainer",
+        url: "https://github.com/owner/repo/issues/42#event-93",
+      }),
+      expect.objectContaining({
+        key: "96",
+        kind: "renamed",
+        from: "Old",
+        to: "New",
+      }),
+      expect.objectContaining({ key: "97", kind: "status", node: "PVTISC_97" }),
     ]);
+  });
+  it("reads duplicate targets and Status moves, leaving out moves the bridge made", async () => {
+    const { api } = setup();
+    const graphql = vi.fn(async () => ({
+      nodes: [
+        {
+          id: "CE_1",
+          duplicateOf: {
+            number: 20,
+            url: "https://github.com/owner/repo/issues/20",
+            title: "Floating items",
+            repository: { nameWithOwner: "owner/repo" },
+          },
+        },
+        {
+          id: "MADE_2",
+          canonical: {
+            number: 42,
+            url: "u42",
+            repository: { nameWithOwner: "owner/repo" },
+          },
+          duplicate: {
+            number: 16,
+            url: "u16",
+            title: "Map",
+            repository: { nameWithOwner: "owner/repo" },
+          },
+        },
+      ],
+    }));
+    Reflect.set(api.github, "graphql", graphql);
+    const statusChanges = vi.fn(async () => ({
+      login: "machine",
+      changes: new Map([
+        ["S_1", { from: "Backlog", to: "Done", project: "Board" }],
+        ["S_2", { from: null, to: "Backlog" }],
+        ["S_3", { from: "Done", to: "Backlog" }],
+      ]),
+    }));
+    Reflect.set(api.options, "projects", { statusChanges });
+    const event = (key: string, kind: string, node: string, actor?: string) =>
+      ({ key, kind, node, actor, createdAt: "", url: "" }) as never;
+    const result = await api.describeEvents(42, [
+      event("1", "closed", "CE_1"),
+      event("2", "duplicate", "MADE_2"),
+      event("3", "status", "S_1", "github-project-automation[bot]"),
+      event("4", "status", "S_2"),
+      event("5", "status", "S_3", "machine"),
+    ]);
+    expect(result.pending).toBe(false);
+    expect(graphql.mock.calls[0][1]).toEqual({ ids: ["CE_1", "MADE_2"] });
+    expect(result.events).toEqual([
+      expect.objectContaining({
+        key: "1",
+        node: undefined,
+        duplicateOf: {
+          label: "#20",
+          url: "https://github.com/owner/repo/issues/20",
+          title: "Floating items",
+        },
+      }),
+      expect.objectContaining({
+        key: "2",
+        duplicate: { label: "#16", url: "u16", title: "Map" },
+      }),
+      expect.objectContaining({
+        key: "3",
+        from: "Backlog",
+        to: "Done",
+        project: "Board",
+      }),
+    ]);
+  });
+  it("reports details it could not read as pending", async () => {
+    const { api } = setup();
+    Reflect.set(
+      api.github,
+      "graphql",
+      vi.fn(async () => {
+        throw Object.assign(new Error("Server error"), { status: 502 });
+      }),
+    );
+    const result = await api.describeEvents(42, [
+      { key: "1", kind: "closed", node: "CE_1", createdAt: "", url: "" },
+      { key: "2", kind: "status", node: "S_1", createdAt: "", url: "" },
+      { key: "3", kind: "reopened", createdAt: "", url: "" },
+    ]);
+    // Without a Projects token, Status moves are not shown; the close is retried later.
+    expect(result).toEqual({
+      pending: true,
+      events: [expect.objectContaining({ key: "3" })],
+    });
   });
   it("treats 304 as unchanged and trusts the ETag only for one-page timelines", async () => {
     const { api } = setup();
@@ -284,7 +404,7 @@ describe("timeline reader", () => {
     const result = await api.timeline(42);
     expect(paginate).toHaveBeenCalledOnce();
     expect(result!.etag).toBeUndefined();
-    expect(result!.events).toHaveLength(4);
+    expect(result!.events).toHaveLength(8);
   });
 });
 
@@ -312,7 +432,7 @@ describe("message bodies", () => {
       createdAt: new Date(),
     });
     expect(message.body).toBe(
-      "Bug Report from **player1**\n\n> **Station signs**\n>\n> Floating signs.",
+      "Bug Report from **player1**\n\n> **Station signs**\n\n> Floating signs.",
     );
   });
 });

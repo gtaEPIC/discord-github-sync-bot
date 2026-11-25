@@ -63,10 +63,16 @@ type Rules = { limit?: "issue" | "comment"; roles?: boolean; source?: Message };
 type RawTimelineEvent = {
   event?: string;
   id?: number;
+  node_id?: string;
   created_at?: string;
-  actor?: { login?: string } | null;
+  actor?: { login?: string; id?: number } | null;
   commit_id?: string | null;
   commit_url?: string | null;
+  state_reason?: string | null;
+  label?: { name?: string };
+  rename?: { from?: string; to?: string };
+  assignee?: { login?: string } | null;
+  milestone?: { title?: string };
   source?: {
     issue?: {
       id?: number;
@@ -78,6 +84,24 @@ type RawTimelineEvent = {
     };
   };
 };
+type DescribedTarget = {
+  number?: number;
+  url?: string;
+  title?: string;
+  repository?: { nameWithOwner?: string };
+};
+type DescribedNode = {
+  id: string;
+  duplicateOf?: DescribedTarget | null;
+  canonical?: DescribedTarget | null;
+  duplicate?: DescribedTarget | null;
+};
+const TARGET = `... on Issue { number url title repository { nameWithOwner } }
+  ... on PullRequest { number url title repository { nameWithOwner } }`;
+/** Duplicate targets of close and duplicate events, which the REST timeline leaves out. */
+const DESCRIBE_EVENTS = `query($ids: [ID!]!) { nodes(ids: $ids) { id
+  ... on ClosedEvent { duplicateOf { ${TARGET} } }
+  ... on MarkedAsDuplicateEvent { canonical { ${TARGET} } duplicate { ${TARGET} } } } }`;
 const HOUR = 3600_000;
 
 export class LivePlatforms implements Platforms {
@@ -636,29 +660,30 @@ export class LivePlatforms implements Platforms {
           request,
         );
     const events: TimelineEvent[] = [];
+    const issueUrl = `https://github.com/${this.options.owner}/${this.options.repo}/issues/${number}`;
     for (const raw of data as RawTimelineEvent[]) {
       const actor = raw.actor?.login;
       if (raw.event === "cross-referenced") {
+        // Kept even when the bridge made it: a Discord reply that mentions #20 shows up in #20.
         const source = raw.source?.issue;
         if (!source?.id || !source.html_url) continue;
         const repo = source.repository?.full_name;
-        const here =
-          repo?.toLowerCase() ===
-          `${this.options.owner}/${this.options.repo}`.toLowerCase();
         events.push({
           key: `xref:${source.id}`,
           kind: "crossref",
           actor,
           createdAt: raw.created_at ?? "",
           url: source.html_url,
-          label: `${here || !repo ? "" : repo}#${source.number}`,
+          label: this.refLabel(repo, source.number),
           title: source.title,
           pullRequest: Boolean(source.pull_request),
         });
-      } else if (
+        continue;
+      }
+      if (raw.id === undefined) continue;
+      if (
         (raw.event === "referenced" || raw.event === "closed") &&
-        raw.commit_id &&
-        raw.id !== undefined
+        raw.commit_id
       ) {
         const repo = raw.commit_url?.match(
           /\/repos\/([^/]+\/[^/]+)\/commits\//,
@@ -675,10 +700,167 @@ export class LivePlatforms implements Platforms {
           createdAt: raw.created_at ?? "",
           url: `https://github.com/${repo ?? `${this.options.owner}/${this.options.repo}`}/commit/${raw.commit_id}`,
           label: here ? sha : `${repo}@${sha}`,
+          reason: raw.state_reason ?? undefined,
         });
+        continue;
+      }
+      // Changes the bridge made itself came from Discord, where they already show.
+      if (this.ownAuthor(raw.actor?.id)) continue;
+      const base = {
+        key: String(raw.id),
+        actor,
+        createdAt: raw.created_at ?? "",
+        url: `${issueUrl}#event-${raw.id}`,
+      };
+      switch (raw.event) {
+        case "closed":
+          events.push({
+            ...base,
+            kind: "closed",
+            reason: raw.state_reason ?? undefined,
+            node: raw.state_reason === "duplicate" ? raw.node_id : undefined,
+          });
+          break;
+        case "reopened":
+        case "locked":
+        case "unlocked":
+          events.push({ ...base, kind: raw.event });
+          break;
+        case "renamed":
+          if (raw.rename)
+            events.push({
+              ...base,
+              kind: "renamed",
+              from: raw.rename.from,
+              to: raw.rename.to,
+            });
+          break;
+        case "labeled":
+        case "unlabeled":
+          if (raw.label?.name)
+            events.push({ ...base, kind: raw.event, name: raw.label.name });
+          break;
+        case "assigned":
+        case "unassigned":
+          if (raw.assignee?.login)
+            events.push({ ...base, kind: raw.event, name: raw.assignee.login });
+          break;
+        case "milestoned":
+        case "demilestoned":
+          if (raw.milestone?.title)
+            events.push({
+              ...base,
+              kind: raw.event,
+              name: raw.milestone.title,
+            });
+          break;
+        case "marked_as_duplicate":
+          if (raw.node_id)
+            events.push({ ...base, kind: "duplicate", node: raw.node_id });
+          break;
+        case "project_v2_item_status_changed":
+          if (raw.node_id)
+            events.push({ ...base, kind: "status", node: raw.node_id });
+          break;
       }
     }
     return { events, etag: single ? first.headers.etag : undefined };
+  }
+  /** `#12` in this repository, `owner/repo#12` elsewhere. */
+  private refLabel(repo: string | undefined, number: number | undefined) {
+    const here =
+      !repo ||
+      repo.toLowerCase() ===
+        `${this.options.owner}/${this.options.repo}`.toLowerCase();
+    return `${here ? "" : repo}#${number}`;
+  }
+  async describeEvents(number: number, events: TimelineEvent[]) {
+    let pending = false;
+    const details = new Map<string, DescribedNode>();
+    const ids = events
+      .filter((e) => e.node && e.kind !== "status")
+      .map((e) => e.node!);
+    if (ids.length) {
+      let nodes: (DescribedNode | null)[] | undefined;
+      try {
+        nodes = (
+          await this.github.graphql<{ nodes: (DescribedNode | null)[] }>(
+            DESCRIBE_EVENTS,
+            { ids },
+          )
+        ).nodes;
+      } catch (error) {
+        // A partial answer (one node hidden) still carries the rest.
+        const failure = error as {
+          status?: number;
+          data?: { nodes?: (DescribedNode | null)[] };
+        };
+        nodes = failure.data?.nodes;
+        const status = failure.status;
+        if (
+          !nodes &&
+          (!status || status >= 500 || status === 403 || status === 429)
+        )
+          pending = true;
+      }
+      for (const node of nodes ?? []) if (node?.id) details.set(node.id, node);
+    }
+    // Status moves need the Projects token (user-owned boards are invisible to the App).
+    let moves: Awaited<ReturnType<ProjectsClient["statusChanges"]>> | undefined;
+    const projects = this.options.projects;
+    if (projects && events.some((e) => e.kind === "status")) {
+      try {
+        moves = await projects.statusChanges(number);
+      } catch (error) {
+        // Access or configuration problems are reported by the Status sync; only retry outages.
+        if (!(error instanceof WriteBlocked)) pending = true;
+      }
+    }
+    const ref = (target?: DescribedTarget | null) =>
+      target?.number && target.url
+        ? {
+            label: this.refLabel(
+              target.repository?.nameWithOwner,
+              target.number,
+            ),
+            url: target.url,
+            title: target.title,
+          }
+        : undefined;
+    const shown: TimelineEvent[] = [];
+    for (const event of events) {
+      if (!event.node) {
+        shown.push(event);
+        continue;
+      }
+      if (event.kind === "status") {
+        const move = moves?.changes.get(event.node);
+        // Moves made with the Projects token came from Discord, and a first placement on the
+        // board is not news.
+        if (!move?.from || event.actor === moves!.login) continue;
+        shown.push({ ...event, node: undefined, ...move });
+        continue;
+      }
+      const node = details.get(event.node);
+      if (!node && pending) continue;
+      if (event.kind === "closed")
+        shown.push({
+          ...event,
+          node: undefined,
+          duplicateOf: ref(node?.duplicateOf),
+        });
+      else {
+        const canonical = ref(node?.canonical);
+        shown.push({
+          ...event,
+          node: undefined,
+          ...(canonical?.label === `#${number}`
+            ? { duplicate: ref(node?.duplicate) }
+            : { duplicateOf: canonical }),
+        });
+      }
+    }
+    return { events: shown, pending };
   }
   async comments(number: number): Promise<Comment[]> {
     const data = await this.github.paginate(this.github.issues.listComments, {

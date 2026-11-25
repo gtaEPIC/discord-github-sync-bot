@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Issue, Message, TimelineEvent } from "./types";
+import { Issue, IssueRef, Message, TimelineEvent } from "./types";
 
 export const hash = (body: string) =>
   createHash("sha256").update(body).digest("hex");
@@ -36,13 +36,62 @@ export function missing(error: unknown): boolean {
   return e.status === 404 || e.code === 10003 || e.code === 10008;
 }
 
-/** One bot-owned message per reference. Titles come from GitHub; mentions are disabled on send. */
+/** One bot-owned message per event. Text comes from GitHub; mentions are disabled on send. */
 export function timelineBody(event: TimelineEvent) {
-  const clean = (text: string) => text.replace(/[\[\]\r\n]/g, " ").trim();
-  const by = event.actor ? ` by **${clean(event.actor)}**` : "";
-  if (event.kind === "crossref")
-    return `Mentioned in ${event.pullRequest ? "pull request" : "issue"} [${event.label}](${event.url})${event.title ? ` ${clean(event.title)}` : ""}${by}`;
-  return `${event.kind === "closed" ? "Closed by" : "Referenced in"} commit [\`${event.label}\`](${event.url})${by}`;
+  const clean = (text: string) =>
+    text
+      .replace(/[\[\]\r\n*_`~|]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const bold = (text?: string | null) => `**${clean(text ?? "") || "none"}**`;
+  const actor = event.actor?.replace(/\[bot\]$/, "");
+  const by = actor ? ` by ${bold(actor)}` : "";
+  const ref = (r: IssueRef) =>
+    `[${r.label}](${r.url})${r.title ? ` ${clean(r.title)}` : ""}`;
+  const commit = `commit [\`${event.label}\`](${event.url})`;
+  switch (event.kind) {
+    case "crossref":
+      return `Mentioned in ${event.pullRequest ? "pull request" : "issue"} ${ref({ label: event.label ?? "", url: event.url, title: event.title })}${by}`;
+    case "commit":
+      return `Referenced in ${commit}${by}`;
+    case "closed": {
+      const reason =
+        event.reason === "not_planned"
+          ? " as not planned"
+          : event.reason === "duplicate"
+            ? ` as a duplicate${event.duplicateOf ? ` of ${ref(event.duplicateOf)}` : ""}`
+            : event.reason === "completed"
+              ? " as completed"
+              : "";
+      return `Closed${reason}${event.label ? ` by ${commit}` : ""}${by}`;
+    }
+    case "reopened":
+      return `Reopened${by}`;
+    case "renamed":
+      return `Renamed from ${bold(event.from)} to ${bold(event.to)}${by}`;
+    case "labeled":
+      return `Label ${bold(event.name)} added${by}`;
+    case "unlabeled":
+      return `Label ${bold(event.name)} removed${by}`;
+    case "assigned":
+      return `Assigned to ${bold(event.name)}${by}`;
+    case "unassigned":
+      return `${bold(event.name)} unassigned${by}`;
+    case "milestoned":
+      return `Added to milestone ${bold(event.name)}${by}`;
+    case "demilestoned":
+      return `Removed from milestone ${bold(event.name)}${by}`;
+    case "locked":
+      return `Conversation locked on GitHub${by}`;
+    case "unlocked":
+      return `Conversation unlocked on GitHub${by}`;
+    case "duplicate":
+      return event.duplicate
+        ? `${ref(event.duplicate)} was marked as a duplicate of this issue${by}`
+        : `Marked as a duplicate${event.duplicateOf ? ` of ${ref(event.duplicateOf)}` : ""}${by}`;
+    case "status":
+      return `Status moved from ${bold(event.from)} to ${bold(event.to)}${event.project ? ` on ${bold(event.project)}` : ""}${by}`;
+  }
 }
 
 /** The parts of a Discord embed that carry text (discord.js `Embed` satisfies this). */
@@ -86,11 +135,14 @@ export function embedMarkdown(embeds: EmbedLike[]): string {
       for (const picture of [e.image, e.thumbnail])
         if (web(picture?.url)) blocks.push(`![image](${picture!.url})`);
       if (e.footer?.text) blocks.push(`_${e.footer.text}_`);
-      return blocks
-        .join("\n\n")
-        .split("\n")
-        .map((line) => (line ? `> ${line}` : ">"))
-        .join("\n");
+      return (
+        blocks
+          .join("\n\n")
+          .split("\n")
+          // A bare ">" shows as a literal ">" on Discord, so blank lines end the quote instead.
+          .map((line) => (line.trim() ? `> ${line}` : ""))
+          .join("\n")
+      );
     })
     .filter((quote) => quote.length)
     .join("\n\n");

@@ -82,19 +82,56 @@ export interface IssueChange {
   state?: "open" | "closed";
   reason?: CloseReason;
 }
-/** A reference to an issue from elsewhere on GitHub, shown in its thread. */
+/** A link to another issue or pull request: `#12` or `owner/repo#12`, its URL and title. */
+export interface IssueRef {
+  label: string;
+  url: string;
+  title?: string;
+}
+/** Something that happened to an issue on GitHub, shown once in its thread. */
 export interface TimelineEvent {
   /** Stable per issue: the event id, or `xref:<source issue id>` (cross-references have no id). */
   key: string;
-  kind: "commit" | "closed" | "crossref";
+  kind:
+    | "commit"
+    | "closed"
+    | "reopened"
+    | "crossref"
+    | "renamed"
+    | "labeled"
+    | "unlabeled"
+    | "assigned"
+    | "unassigned"
+    | "milestoned"
+    | "demilestoned"
+    | "locked"
+    | "unlocked"
+    | "duplicate"
+    | "status";
   actor?: string;
   createdAt: string;
+  /** Where the message links to: the reference, the commit, or the event on the issue. */
   url: string;
-  /** `abc1234`, `owner/repo@abc1234`, `#12` or `owner/repo#12`. */
-  label: string;
+  /** Commit (`abc1234`, `owner/repo@abc1234`) or cross-reference (`#12`, `owner/repo#12`). */
+  label?: string;
   /** Issue or pull request title (cross-references). */
   title?: string;
   pullRequest?: boolean;
+  /** Close reason: completed, not_planned or duplicate. */
+  reason?: string;
+  /** Renamed titles and Status moves. */
+  from?: string | null;
+  to?: string | null;
+  /** The label, assignee or milestone. */
+  name?: string;
+  /** Closed as, or marked as, a duplicate of this issue. */
+  duplicateOf?: IssueRef;
+  /** Another issue marked as a duplicate of this one. */
+  duplicate?: IssueRef;
+  /** Project board title (Status moves). */
+  project?: string;
+  /** GraphQL id of an event whose details are still to be read (see `describeEvents`). */
+  node?: string;
 }
 export interface Mirror {
   key: string;
@@ -166,13 +203,22 @@ export interface Platforms {
   /** Status for open issues that are not on the board yet; undefined = do not add them. */
   defaultStatus(): string | undefined;
   /**
-   * References to the issue (commits, issues, pull requests). Undefined when unchanged since
-   * `etag`; the returned etag is only set when it covers the whole timeline.
+   * What happened to the issue on GitHub: references, closes, renames, labels and so on.
+   * Changes this bridge made itself are left out. Undefined when unchanged since `etag`; the
+   * returned etag is only set when it covers the whole timeline.
    */
   timeline(
     number: number,
     etag?: string,
   ): Promise<{ events: TimelineEvent[]; etag?: string } | undefined>;
+  /**
+   * Read the details of events that carry a `node` (duplicate targets, Status moves) and
+   * return the ones worth showing. `pending` means some details could not be read this time.
+   */
+  describeEvents(
+    number: number,
+    events: TimelineEvent[],
+  ): Promise<{ events: TimelineEvent[]; pending: boolean }>;
   threadMeta(thread: string): Promise<ThreadMeta>;
   /**
    * Apply only the given changes, as a delta against the thread's current tags.

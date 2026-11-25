@@ -230,6 +230,44 @@ export class ProjectsClient {
     return { id: issue.id, item };
   }
 
+  /**
+   * An issue's Status moves on any board, keyed by event id (the REST timeline has no
+   * details), and the token's own login: moves made with it came from the bridge.
+   */
+  async statusChanges(number: number) {
+    const { owner, repo } = this.options.repo;
+    type Move = {
+      id?: string;
+      previousStatus?: string | null;
+      status?: string | null;
+      project?: { title?: string } | null;
+    };
+    const data = await this.graphql<{
+      viewer: { login: string };
+      repository: {
+        issue: { timelineItems: { nodes: (Move | null)[] } } | null;
+      } | null;
+    }>(
+      `query($owner: String!, $repo: String!, $number: Int!) { viewer { login }
+        repository(owner: $owner, name: $repo) { issue(number: $number) {
+          timelineItems(last: 100, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) { nodes {
+            ... on ProjectV2ItemStatusChangedEvent { id previousStatus status project { title } } } } } } }`,
+      { owner, repo, number },
+    );
+    const changes = new Map<
+      string,
+      { from: string | null; to: string | null; project?: string }
+    >();
+    for (const node of data.repository?.issue?.timelineItems.nodes ?? [])
+      if (node?.id)
+        changes.set(node.id, {
+          from: node.previousStatus || null,
+          to: node.status || null,
+          project: node.project?.title,
+        });
+    return { login: data.viewer.login, changes };
+  }
+
   private remember(number: number, item: ProjectItem | null) {
     if (!this.items) return;
     if (item) this.items.map.set(number, item);

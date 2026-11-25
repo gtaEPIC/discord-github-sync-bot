@@ -1,5 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { embedMarkdown } from "./content";
+import { embedMarkdown, timelineBody } from "./content";
+
+describe("timeline messages", () => {
+  const at = {
+    key: "1",
+    createdAt: "",
+    url: "https://github.com/o/r/issues/20#event-1",
+  };
+  it("describes GitHub-side changes in one line, without Markdown from titles", () => {
+    expect(
+      timelineBody({
+        ...at,
+        kind: "duplicate",
+        actor: "maintainer",
+        duplicate: {
+          label: "#16",
+          url: "https://github.com/o/r/issues/16",
+          title: "[Zgmaker9] *Floating* Map",
+        },
+      }),
+    ).toBe(
+      "[#16](https://github.com/o/r/issues/16) Zgmaker9 Floating Map was marked as a duplicate of this issue by **maintainer**",
+    );
+    expect(
+      timelineBody({ ...at, kind: "renamed", from: "Old **x**", to: "New" }),
+    ).toBe("Renamed from **Old x** to **New**");
+    expect(
+      timelineBody({
+        ...at,
+        kind: "closed",
+        reason: "not_planned",
+        actor: "a",
+      }),
+    ).toBe("Closed as not planned by **a**");
+    expect(
+      timelineBody({ ...at, kind: "status", from: "Backlog", to: null }),
+    ).toBe("Status moved from **Backlog** to **none**");
+  });
+});
 
 describe("embed rendering", () => {
   it("renders a webhook bug report embed as quoted Markdown", () => {
@@ -22,16 +60,16 @@ describe("embed rendering", () => {
     expect(embedMarkdown([report])).toBe(
       [
         "> **Station signs**",
-        ">",
+        "",
         "> The station name and some signs are floating in the air.",
-        ">",
+        "",
         "> **Occupied Blocks**",
         "> • B61 (player1)",
         "> • MST-B250 (player2)",
-        ">",
+        "",
         "> **Server Logs**",
         "> *Upload failed — service may be unavailable*",
-        ">",
+        "",
         "> _Report 42_",
       ].join("\n"),
     );

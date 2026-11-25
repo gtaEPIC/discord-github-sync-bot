@@ -440,9 +440,10 @@ export class Engine {
   }
 
   /**
-   * Mirror references to the issue as bot-owned messages, once each. Bounded to open issues
-   * and recently closed ones; an ETag makes unchanged timelines free. References made before
-   * the mapping started are not posted, so a backfill does not flood old threads.
+   * Mirror what happened on GitHub (references, closes, renames, labels, Status moves) as
+   * bot-owned messages, once each. Bounded to open issues and recently closed ones; an ETag
+   * makes unchanged timelines free. Events from before the mapping started are not posted, so
+   * a backfill does not flood old threads.
    */
   private async timeline(link: Link, issue: Issue, history: Message[]) {
     const settings = this.options.timeline;
@@ -454,16 +455,27 @@ export class Engine {
         settings.maxAgeDaysClosed * 86400_000
     )
       return;
-    const etagKey = `timeline-etag:${issue.number}`;
+    // v2: more event kinds are shown, so every timeline is read in full once more.
+    this.store.deleteMeta(`timeline-etag:${issue.number}`);
+    const etagKey = `timeline-etag:v2:${issue.number}`;
     const result = await this.api.timeline(
       issue.number,
       this.store.meta(etagKey),
     );
     if (!result) return;
     const started = this.store.meta("started")!;
-    for (const event of result.events) {
+    const fresh = result.events.filter((event) => {
+      const mirrored = this.store.mirror(
+        `timeline:${issue.number}:${event.key}`,
+      );
+      // Events whose details are read separately never change once shown.
+      return mirrored ? !event.node : event.createdAt >= started;
+    });
+    const { events, pending } = fresh.some((e) => e.node)
+      ? await this.api.describeEvents(issue.number, fresh)
+      : { events: fresh, pending: false };
+    for (const event of events) {
       const key = `timeline:${issue.number}:${event.key}`;
-      if (event.createdAt < started && !this.store.mirror(key)) continue;
       await this.render(
         link,
         key,
@@ -473,7 +485,8 @@ export class Engine {
         history,
       );
     }
-    if (result.etag) this.store.setMeta(etagKey, result.etag);
+    // Details that could not be read this time: read the timeline again next time.
+    if (result.etag && !pending) this.store.setMeta(etagKey, result.etag);
     else this.store.deleteMeta(etagKey);
   }
 

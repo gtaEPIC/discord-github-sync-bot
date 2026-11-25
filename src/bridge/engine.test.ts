@@ -112,6 +112,19 @@ class Fake implements Platforms {
     if (etag === tag) return undefined;
     return { events: structuredClone(events), etag: tag };
   });
+  /** Details by node id; null = not worth showing. */
+  eventDetails = new Map<string, Partial<TimelineEvent> | null>();
+  describePending = false;
+  describeEvents = vi.fn(async (_number: number, events: TimelineEvent[]) => ({
+    pending: this.describePending,
+    events: events.flatMap((e) => {
+      if (!e.node) return [e];
+      const details = this.eventDetails.get(e.node);
+      return this.describePending || details === null
+        ? []
+        : [{ ...e, node: undefined, ...details }];
+    }),
+  }));
   threadMeta = vi.fn(async (thread: string) => {
     const meta = this.meta.get(thread);
     if (!meta) throw Object.assign(new Error("Not found"), { status: 404 });
@@ -1100,7 +1113,7 @@ describe("timeline references", () => {
     await engine.github(issue.number);
     expect(api.send).not.toHaveBeenCalled();
     // A restart with the same database, and a timeline read without the ETag: no repeats.
-    store.deleteMeta(`timeline-etag:${issue.number}`);
+    store.deleteMeta(`timeline-etag:v2:${issue.number}`);
     const restarted = new Engine(store, api, false, {
       timeline: { maxAgeDaysClosed: 14 },
     });
@@ -1111,6 +1124,96 @@ describe("timeline references", () => {
     api.timelineByIssue.get(issue.number)!.push(commit("9999999abc"));
     await restarted.github(issue.number);
     expect(api.send).toHaveBeenCalledOnce();
+  });
+  it("posts closes and Status moves made on GitHub once, reading their details once", async () => {
+    const { engine, api, store, issue, bodies } = await linked();
+    const at = new Date().toISOString();
+    const url = `https://github.com/o/r/issues/${issue.number}`;
+    api.timelineByIssue.set(issue.number, [
+      {
+        key: "1",
+        kind: "closed",
+        reason: "duplicate",
+        node: "CE_1",
+        actor: "maintainer",
+        createdAt: at,
+        url: `${url}#event-1`,
+      },
+      {
+        key: "2",
+        kind: "status",
+        node: "PVTISC_2",
+        actor: "github-project-automation[bot]",
+        createdAt: at,
+        url: `${url}#event-2`,
+      },
+      {
+        key: "3",
+        kind: "status",
+        node: "PVTISC_3",
+        createdAt: at,
+        url: `${url}#event-3`,
+      },
+      {
+        key: "4",
+        kind: "labeled",
+        name: "bug",
+        actor: "maintainer",
+        createdAt: at,
+        url: `${url}#event-4`,
+      },
+    ]);
+    api.eventDetails.set("CE_1", {
+      duplicateOf: {
+        label: "#20",
+        url: "https://github.com/o/r/issues/20",
+        title: "Floating items",
+      },
+    });
+    api.eventDetails.set("PVTISC_2", {
+      from: "Backlog",
+      to: "Done",
+      project: "Board",
+    });
+    api.eventDetails.set("PVTISC_3", null);
+    await engine.github(issue.number);
+    const posted = bodies().filter((b) => /^(Closed|Status|Label) /.test(b));
+    expect(posted.map((b) => b.split("\n")[0])).toEqual([
+      "Closed as a duplicate of [#20](https://github.com/o/r/issues/20) Floating items by **maintainer**",
+      "Status moved from **Backlog** to **Done** on **Board** by **github-project-automation**",
+      "Label **bug** added by **maintainer**",
+    ]);
+    // A full re-read does not post again or read the details again.
+    store.deleteMeta(`timeline-etag:v2:${issue.number}`);
+    api.describeEvents.mockClear();
+    api.send.mockClear();
+    await engine.github(issue.number);
+    expect(api.send).not.toHaveBeenCalled();
+    expect(
+      api.describeEvents.mock.calls.every(([, events]) =>
+        events.every((e) => !e.node || e.key === "3"),
+      ),
+    ).toBe(true);
+  });
+  it("retries events whose details could not be read, without caching the timeline", async () => {
+    const { engine, api, store, issue, bodies } = await linked();
+    api.timelineByIssue.set(issue.number, [
+      {
+        key: "1",
+        kind: "status",
+        node: "PVTISC_1",
+        createdAt: new Date().toISOString(),
+        url: "https://github.com/o/r/issues/1#event-1",
+      },
+    ]);
+    api.eventDetails.set("PVTISC_1", { from: "Backlog", to: "In Progress" });
+    api.describePending = true;
+    await engine.github(issue.number);
+    expect(bodies().some((b) => b.includes("Status moved"))).toBe(false);
+    expect(store.meta(`timeline-etag:v2:${issue.number}`)).toBeUndefined();
+    api.describePending = false;
+    await engine.github(issue.number);
+    expect(bodies().filter((b) => b.includes("Status moved"))).toHaveLength(1);
   });
   it("skips references from before the mapping started", async () => {
     const { engine, api, issue, bodies } = await linked();
