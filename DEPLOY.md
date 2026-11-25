@@ -20,35 +20,27 @@ Pick the public hostname, for example `issues.example.com`. `PUBLIC_URL` is its 
 
 ## 3. Create the Komodo stack
 
-In Komodo: **Stacks → New stack**, on the target server, using **UI defined** compose:
+The repository ships `deploy/compose.yaml` for this: it pulls the published image (never builds) and reads its settings from the environment.
 
-```yaml
-services:
-  bot:
-    image: ghcr.io/<owner>/discord-github-sync-bot:0.1.0
-    restart: unless-stopped
-    init: true
-    environment:
-      PORT: "5000"
-      DATA_DIR: /app/data
-      PUBLIC_URL: https://issues.example.com
-    ports:
-      - "127.0.0.1:5000:5000"
-    volumes:
-      - bot-data:/app/data
-    stop_grace_period: 35s
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }
-volumes:
-  bot-data:
-```
+In Komodo: **Stacks → New Stack**, name it (for example `ry-issue-bridge`), choose the server, then in its config:
 
-- Pin a version instead of `latest`, so an update is a deliberate tag change and a rollback is the previous tag.
-- If `cloudflared` runs as a container on the same host, put both on one Docker network and drop the `ports:` mapping; the tunnel then targets `http://bot:5000`.
+- **Source: Git Repo**. Provider `github.com`, repo `gtaEPIC/discord-github-sync-bot`, branch `main`. The repository is public, so no account is needed.
+- **Run Directory**: `deploy`. **File Paths**: `compose.yaml`.
+- **Environment**:
+
+  ```
+  PUBLIC_URL=https://issues.example.com
+  IMAGE_TAG=0.1.0
+  ```
+
+  Optional: `BIND_ADDRESS` (default `127.0.0.1`) and `HOST_PORT` (default `5000`).
+
+**Save**, then **Deploy**. Check `curl -f http://127.0.0.1:5000/health` on the server.
+
+- `IMAGE_TAG` pins a version, so an update is a deliberate change and a rollback is the previous tag.
+- The data volume is named `ry-issue-bridge-data` regardless of the stack name. Never destroy it or run `docker compose down -v`.
+- If `cloudflared` runs in a container on another Docker network, it cannot reach `127.0.0.1` on the host. Either run it with host networking, or set `BIND_ADDRESS` to an address it can reach (such as the Docker bridge gateway, often `172.17.0.1`) and keep that port firewalled from the internet.
 - Never publish port 5001 (first-administrator setup). It stays inside the container.
-
-Deploy the stack, then check `curl -f http://127.0.0.1:5000/health` on the server.
 
 ## 4. Add the tunnel route
 
@@ -147,6 +139,6 @@ On the mapping row, **Import…** shows which active forum posts would get an is
 
 ## Updates and backups
 
-- **Update:** push a new tag (step 1), change the image tag in the Komodo stack and redeploy. State lives in `bot-data` and survives. Never run `docker compose down -v` or delete the volume.
-- **Back up** the whole volume, including `master.key`, while the stack is stopped (Komodo **Stop**, copy the volume directory, **Start**). The volume directory is shown by `docker volume inspect <stack>_bot-data`. `master.key` plus `management.sqlite` can decrypt the saved credentials, so store backups privately.
+- **Update:** push a new tag (step 1), change `IMAGE_TAG` in the Komodo stack's environment and redeploy. State lives in `bot-data` and survives. Never run `docker compose down -v` or delete the volume.
+- **Back up** the whole volume, including `master.key`, while the stack is stopped (Komodo **Stop**, copy the volume directory, **Start**). The volume directory is shown by `docker volume inspect ry-issue-bridge-data`. `master.key` plus `management.sqlite` can decrypt the saved credentials, so store backups privately.
 - **Rotate** tokens by saving new ones in **/admin → Connections**; revoke the old ones on Discord or GitHub.

@@ -1,0 +1,34 @@
+# Server deployment (for example a Komodo stack in Git repo mode, run directory "deploy").
+# Pulls the published image and never builds. Set these in the stack's environment:
+#   PUBLIC_URL    required: the https origin of the public hostname, e.g. https://issues.example.com
+#   IMAGE_TAG     optional: image version to run, e.g. 0.1.0 (default latest; pin it for rollbacks)
+#   BIND_ADDRESS  optional: host address for port 5000 (default 127.0.0.1, reachable only from the host)
+#   HOST_PORT     optional: host port (default 5000)
+# Credentials are not configured here: they are saved, encrypted, in the web UI at /admin.
+# Never remove the volume (docker compose down -v): it holds all state, including master.key.
+services:
+  bot:
+    image: ghcr.io/gtaepic/discord-github-sync-bot:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    environment:
+      PORT: "5000"
+      DATA_DIR: /app/data
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL to the https origin of the public hostname}
+      RECONCILE_SECONDS: ${RECONCILE_SECONDS:-300}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HOST_PORT:-5000}:5000"
+    volumes:
+      - bot-data:/app/data
+    stop_grace_period: 35s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:
+    # A fixed name, so renaming the stack never orphans the data.
+    name: ry-issue-bridge-data
