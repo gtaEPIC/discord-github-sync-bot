@@ -44,3 +44,54 @@ export function timelineBody(event: TimelineEvent) {
     return `Mentioned in ${event.pullRequest ? "pull request" : "issue"} [${event.label}](${event.url})${event.title ? ` ${clean(event.title)}` : ""}${by}`;
   return `${event.kind === "closed" ? "Closed by" : "Referenced in"} commit [\`${event.label}\`](${event.url})${by}`;
 }
+
+/** The parts of a Discord embed that carry text (discord.js `Embed` satisfies this). */
+export interface EmbedLike {
+  data?: { type?: string };
+  title?: string | null;
+  url?: string | null;
+  description?: string | null;
+  author?: { name: string; url?: string } | null;
+  fields?: { name: string; value: string }[];
+  footer?: { text: string } | null;
+  image?: { url: string } | null;
+  thumbnail?: { url: string } | null;
+}
+
+/**
+ * Rich embeds (what webhooks and bots send) as quoted Markdown. Link previews Discord adds
+ * to members' URLs are skipped: they repeat the URL and arrive later as an edit.
+ */
+export function embedMarkdown(embeds: EmbedLike[]): string {
+  const label = (text: string) => text.replace(/[\[\]\r\n]/g, " ").trim();
+  const web = (url?: string | null) =>
+    url && /^https?:\/\//i.test(url) ? url : undefined;
+  return embeds
+    .filter((e) => !e.data?.type || e.data.type === "rich")
+    .map((e) => {
+      const blocks: string[] = [];
+      if (e.author?.name)
+        blocks.push(
+          web(e.author.url)
+            ? `_[${label(e.author.name)}](${e.author.url})_`
+            : `_${e.author.name}_`,
+        );
+      if (e.title)
+        blocks.push(
+          web(e.url) ? `**[${label(e.title)}](${e.url})**` : `**${e.title}**`,
+        );
+      if (e.description) blocks.push(e.description);
+      for (const field of e.fields ?? [])
+        blocks.push(`**${field.name}**\n${field.value}`);
+      for (const picture of [e.image, e.thumbnail])
+        if (web(picture?.url)) blocks.push(`![image](${picture!.url})`);
+      if (e.footer?.text) blocks.push(`_${e.footer.text}_`);
+      return blocks
+        .join("\n\n")
+        .split("\n")
+        .map((line) => (line ? `> ${line}` : ">"))
+        .join("\n");
+    })
+    .filter((quote) => quote.length)
+    .join("\n\n");
+}

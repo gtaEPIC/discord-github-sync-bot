@@ -8,7 +8,13 @@ import {
 } from "discord.js";
 import { Authorship, Writer, WriteBlocked } from "./authorship";
 import { uploadToR2 } from "../r2";
-import { chunks, issueSummary, missing, sourceBody } from "./content";
+import {
+  chunks,
+  embedMarkdown,
+  issueSummary,
+  missing,
+  sourceBody,
+} from "./content";
 import {
   Comment,
   Issue,
@@ -760,7 +766,10 @@ export class LivePlatforms implements Platforms {
     return channel;
   }
   private async message(message: DiscordMessage): Promise<Message> {
-    let body = message.content;
+    // Webhook and bot reports often carry most of their text in embeds.
+    let body = [message.content, embedMarkdown(message.embeds ?? [])]
+      .filter(Boolean)
+      .join("\n\n");
     for (const file of message.attachments.values()) {
       let url = file.url;
       if (process.env.R2_BUCKET && this.hostedAttachments.has(file.id)) {

@@ -287,3 +287,32 @@ describe("timeline reader", () => {
     expect(result!.events).toHaveLength(4);
   });
 });
+
+describe("message bodies", () => {
+  it("adds a webhook's embeds after its text", async () => {
+    const { api } = setup();
+    const message = await (
+      api as unknown as { message(m: unknown): Promise<{ body: string }> }
+    ).message({
+      id: "1",
+      channelId: "thread",
+      url: "https://discord.com/m",
+      content: "Bug Report from **player1**",
+      attachments: new Map(),
+      embeds: [
+        {
+          data: { type: "rich" },
+          title: "Station signs",
+          description: "Floating signs.",
+          fields: [],
+        },
+      ],
+      author: { id: "777777777", username: "Bug Reporter", bot: true },
+      webhookId: "777777777",
+      createdAt: new Date(),
+    });
+    expect(message.body).toBe(
+      "Bug Report from **player1**\n\n> **Station signs**\n>\n> Floating signs.",
+    );
+  });
+});
