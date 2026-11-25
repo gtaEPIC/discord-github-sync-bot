@@ -15,6 +15,7 @@ import {
   Platforms,
   Post,
   ThreadMeta,
+  TimelineEvent,
 } from "./types";
 import { CloseTag, ManagedTag, StatusTag } from "./reconcile";
 import { ProjectItem } from "./projects";
@@ -104,6 +105,13 @@ class Fake implements Platforms {
       this.board!.set(number, { id: `item-${number}`, status });
   });
   defaultStatus = vi.fn(() => this.initialStatus);
+  timelineByIssue = new Map<number, TimelineEvent[]>();
+  timeline = vi.fn(async (number: number, etag?: string) => {
+    const events = this.timelineByIssue.get(number) ?? [];
+    const tag = `"${events.length}:${events.map((e) => e.key).join(",")}"`;
+    if (etag === tag) return undefined;
+    return { events: structuredClone(events), etag: tag };
+  });
   threadMeta = vi.fn(async (thread: string) => {
     const meta = this.meta.get(thread);
     if (!meta) throw Object.assign(new Error("Not found"), { status: 404 });
@@ -1040,5 +1048,90 @@ describe("Projects status", () => {
     await engine.github(issue.number);
     expect(api.board!.get(issue.number)!.status).toBe("In Progress");
     expect(store.health().blocked).toBe(0);
+  });
+});
+
+describe("timeline references", () => {
+  const commit = (key: string, createdAt = new Date().toISOString()) => ({
+    key,
+    kind: "commit" as const,
+    actor: "dev",
+    createdAt,
+    url: `https://github.com/o/r/commit/${key}`,
+    label: key.slice(0, 7),
+  });
+  const xref = () => ({
+    key: "xref:555",
+    kind: "crossref" as const,
+    actor: "dev",
+    createdAt: new Date().toISOString(),
+    url: "https://github.com/o/r/pull/12",
+    label: "#12",
+    title: "Fix the doors",
+    pullRequest: true,
+  });
+  async function linked() {
+    const ctx = setup({ timeline: { maxAgeDaysClosed: 14 } });
+    const issue = ctx.api.addIssue();
+    await ctx.engine.github(issue.number);
+    const thread = ctx.store.link(issue.number)!.thread;
+    const bodies = () =>
+      ctx.api.messagesByThread.get(thread)!.map((m) => m.body);
+    return { ...ctx, issue, thread, bodies };
+  }
+  it("is off unless configured", async () => {
+    const { engine, api } = setup();
+    const issue = api.addIssue();
+    await engine.github(issue.number);
+    expect(api.timeline).not.toHaveBeenCalled();
+  });
+  it("posts each reference once, survives restarts, and never marks references deleted", async () => {
+    const { engine, api, store, issue, bodies } = await linked();
+    api.timelineByIssue.set(issue.number, [commit("abcdef1234"), xref()]);
+    await engine.github(issue.number);
+    const posted = bodies().filter((b) => /commit|Mentioned/.test(b));
+    expect(posted).toHaveLength(2);
+    expect(posted[0]).toContain("Referenced in commit [`abcdef1`]");
+    expect(posted[1]).toContain(
+      "Mentioned in pull request [#12](https://github.com/o/r/pull/12) Fix the doors by **dev**",
+    );
+    // Unchanged timeline: the ETag answers, nothing is sent.
+    api.send.mockClear();
+    await engine.github(issue.number);
+    expect(api.send).not.toHaveBeenCalled();
+    // A restart with the same database, and a timeline read without the ETag: no repeats.
+    store.deleteMeta(`timeline-etag:${issue.number}`);
+    const restarted = new Engine(store, api, false, {
+      timeline: { maxAgeDaysClosed: 14 },
+    });
+    await restarted.github(issue.number);
+    expect(api.send).not.toHaveBeenCalled();
+    expect(bodies().some((b) => b.includes("deleted on GitHub"))).toBe(false);
+    // A new reference is added; the old ones stay.
+    api.timelineByIssue.get(issue.number)!.push(commit("9999999abc"));
+    await restarted.github(issue.number);
+    expect(api.send).toHaveBeenCalledOnce();
+  });
+  it("skips references from before the mapping started", async () => {
+    const { engine, api, issue, bodies } = await linked();
+    api.timelineByIssue.set(issue.number, [
+      commit("0000000old", "2020-01-01T00:00:00.000Z"),
+    ]);
+    await engine.github(issue.number);
+    expect(bodies().some((b) => b.includes("commit"))).toBe(false);
+  });
+  it("stops reading the timeline of issues closed longer ago than the limit", async () => {
+    const { engine, api, issue } = await linked();
+    Object.assign(api.gh[0], {
+      state: "closed",
+      closedAt: new Date(Date.now() - 2 * 86400_000).toISOString(),
+    });
+    api.timeline.mockClear();
+    await engine.github(issue.number);
+    expect(api.timeline).toHaveBeenCalledOnce();
+    api.gh[0].closedAt = new Date(Date.now() - 20 * 86400_000).toISOString();
+    api.timeline.mockClear();
+    await engine.github(issue.number);
+    expect(api.timeline).not.toHaveBeenCalled();
   });
 });

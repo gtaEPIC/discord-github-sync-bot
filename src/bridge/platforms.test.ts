@@ -178,3 +178,112 @@ describe("Discord adapter", () => {
     await expect(api.getPost(thread.id)).rejects.toMatchObject({ status: 404 });
   });
 });
+
+describe("timeline reader", () => {
+  const events = [
+    {
+      event: "cross-referenced",
+      created_at: "2026-11-24T00:00:00Z",
+      actor: { login: "dev" },
+      source: {
+        issue: {
+          id: 555,
+          number: 12,
+          title: "Fix the doors",
+          html_url: "https://github.com/owner/repo/pull/12",
+          pull_request: {},
+          repository: { full_name: "owner/repo" },
+        },
+      },
+    },
+    {
+      event: "cross-referenced",
+      created_at: "2026-11-24T00:00:00Z",
+      source: {
+        issue: {
+          id: 777,
+          number: 3,
+          title: "Elsewhere",
+          html_url: "https://github.com/other/tool/issues/3",
+          repository: { full_name: "other/tool" },
+        },
+      },
+    },
+    {
+      event: "referenced",
+      id: 91,
+      created_at: "2026-11-24T00:00:00Z",
+      actor: { login: "dev" },
+      commit_id: "abcdef1234567890",
+      commit_url:
+        "https://api.github.com/repos/owner/repo/commits/abcdef1234567890",
+    },
+    {
+      event: "closed",
+      id: 92,
+      created_at: "2026-11-24T00:00:00Z",
+      commit_id: "1234567abcdef",
+      commit_url:
+        "https://api.github.com/repos/fork/repo/commits/1234567abcdef",
+    },
+    { event: "closed", id: 93, commit_id: null },
+    { event: "labeled", id: 94 },
+  ];
+  it("keeps cross-references and commit references, keyed for deduplication", async () => {
+    const { api } = setup();
+    const list = vi.fn(async () => ({
+      data: events,
+      headers: { etag: 'W/"one"' },
+    }));
+    Reflect.set(api.github.issues, "listEventsForTimeline", list);
+    const result = await api.timeline(42);
+    expect(result!.etag).toBe('W/"one"');
+    expect(result!.events).toEqual([
+      expect.objectContaining({
+        key: "xref:555",
+        kind: "crossref",
+        label: "#12",
+        pullRequest: true,
+        title: "Fix the doors",
+      }),
+      expect.objectContaining({
+        key: "xref:777",
+        label: "other/tool#3",
+        pullRequest: false,
+      }),
+      expect.objectContaining({
+        key: "91",
+        kind: "commit",
+        label: "abcdef1",
+        url: "https://github.com/owner/repo/commit/abcdef1234567890",
+      }),
+      expect.objectContaining({
+        key: "92",
+        kind: "closed",
+        label: "fork/repo@1234567",
+      }),
+    ]);
+  });
+  it("treats 304 as unchanged and trusts the ETag only for one-page timelines", async () => {
+    const { api } = setup();
+    const list = vi.fn(async (options: { headers: Record<string, string> }) => {
+      if (options.headers["if-none-match"])
+        throw Object.assign(new Error("Not modified"), { status: 304 });
+      return {
+        data: events.slice(0, 1),
+        headers: {
+          etag: '"page1"',
+          link: '<https://api.github.com/x?page=2>; rel="next"',
+        },
+      };
+    });
+    const paginate = vi.fn(async () => events);
+    Reflect.set(api.github.issues, "listEventsForTimeline", list);
+    Reflect.set(api.github, "paginate", paginate);
+    expect(await api.timeline(42, '"page1"')).toBeUndefined();
+    const result = await api.timeline(42);
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(result!.etag).toBeUndefined();
+    expect(result!.events).toHaveLength(4);
+  });
+});

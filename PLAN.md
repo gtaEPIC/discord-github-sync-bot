@@ -151,9 +151,9 @@ Each phase ends with typecheck, tests, build, docker build and smoke green, then
 - Acceptance: moving a card in the project changes the thread's status tag; changing the tag moves the card; closing the issue ends in a consistent state with no ping-pong.
 
 ### Phase 5: Commits and mentions (D8)
-- [ ] Timeline reader in `LivePlatforms`; render and dedupe by mirror key.
-- [ ] Config `timeline`; bound requests (open issues plus recently closed).
-- [ ] Optional, off by default: @mention to Discord ping via linked accounts. Upstream disables pings on purpose.
+- [x] Timeline reader in `LivePlatforms` (`timeline(number, etag)`): `cross-referenced` (issues and PRs; keyed `xref:<source issue id>` since these events have no id), and `referenced` / `closed` events with a `commit_id` (keyed by event id). Rendered by `engine.timeline()` as bot-owned mirrors `timeline:<issue>:<key>`, excluded from the comment-deletion loop. Commit titles are not fetched (that needs Contents: read on the token); the short SHA links to the commit, prefixed with `owner/repo@` when the commit is in another repository.
+- [x] Config `timeline` (presence enables it; `maxAgeDaysClosed` default 14). Bounded to open issues and issues closed within that window. `If-None-Match` with the stored ETag (`meta timeline-etag:N`); 304 is a no-op. The ETag is kept only for one-page timelines, because the first page's ETag says nothing about later pages. Events from before the mapping started are skipped unless already mirrored. Tests: engine (off by default, once each, ETag quiet, restart without ETag does not repeat, never tombstoned, new reference added, pre-start skipped, closed-age bound), adapter (parsing and keys, 304, ETag only for one page), config. 208 tests.
+- [x] ~~Optional @mention to Discord ping via linked accounts.~~ Dropped: Q4 chose cross-references only, and upstream disables pings on purpose.
 - Acceptance: a commit that references `#N` shows up once in the thread; a cross-reference from another issue shows up once; none repeat after restart.
 
 ### Phase 6: Deploy to server2

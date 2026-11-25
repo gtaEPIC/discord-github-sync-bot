@@ -14,6 +14,7 @@ export interface Issue {
   labels: string[];
   locked: boolean;
   createdAt: string;
+  closedAt?: string | null;
   own?: boolean;
   authorId?: string;
   writer?: Writer;
@@ -77,6 +78,20 @@ export interface IssueChange {
   removeLabels?: string[];
   state?: "open" | "closed";
   reason?: CloseReason;
+}
+/** A reference to an issue from elsewhere on GitHub, shown in its thread. */
+export interface TimelineEvent {
+  /** Stable per issue: the event id, or `xref:<source issue id>` (cross-references have no id). */
+  key: string;
+  kind: "commit" | "closed" | "crossref";
+  actor?: string;
+  createdAt: string;
+  url: string;
+  /** `abc1234`, `owner/repo@abc1234`, `#12` or `owner/repo#12`. */
+  label: string;
+  /** Issue or pull request title (cross-references). */
+  title?: string;
+  pullRequest?: boolean;
 }
 export interface Mirror {
   key: string;
@@ -145,6 +160,14 @@ export interface Platforms {
   setProjectStatus(number: number, status: string | null): Promise<void>;
   /** Status for open issues that are not on the board yet; undefined = do not add them. */
   defaultStatus(): string | undefined;
+  /**
+   * References to the issue (commits, issues, pull requests). Undefined when unchanged since
+   * `etag`; the returned etag is only set when it covers the whole timeline.
+   */
+  timeline(
+    number: number,
+    etag?: string,
+  ): Promise<{ events: TimelineEvent[]; etag?: string } | undefined>;
   threadMeta(thread: string): Promise<ThreadMeta>;
   /**
    * Apply only the given changes, as a delta against the thread's current tags.

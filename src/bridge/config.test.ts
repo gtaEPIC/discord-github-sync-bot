@@ -105,6 +105,15 @@ describe("bridge settings", () => {
       }),
     ).toThrow(/both a close tag and a status tag/);
   });
+  it("validates timeline settings", () => {
+    expect(parseBridgeConfig({ timeline: {} })).toEqual({ timeline: {} });
+    expect(resolveConfig({ timeline: {} }).timeline).toEqual({
+      maxAgeDaysClosed: 14,
+    });
+    expect(resolveConfig({}).timeline).toBeUndefined();
+    for (const bad of [true, { maxAgeDaysClosed: -1 }, { days: 3 }])
+      expect(() => parseBridgeConfig({ timeline: bad })).toThrow(ConfigError);
+  });
   it("never resolves corrupt stored settings to bridge mode", () => {
     expect(resolveConfig({ writeMode: "bridge", typo: true }).writeMode).toBe(
       "user",

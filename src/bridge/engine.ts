@@ -8,6 +8,7 @@ import {
   messageMarker,
   missing,
   sourceBody,
+  timelineBody,
 } from "./content";
 import { Issue, Link, Message, Platforms, Task } from "./types";
 import { MetadataInput, githubStatusTag, planMetadata } from "./reconcile";
@@ -16,6 +17,8 @@ import { ProjectItem } from "./projects";
 export interface EngineOptions {
   /** Bridge mode: Discord title and tag changes are written to GitHub. Otherwise GitHub wins. */
   discordWrites?: boolean;
+  /** Show references (commits, issues, pull requests) in threads; off when absent. */
+  timeline?: { maxAgeDaysClosed: number };
 }
 
 /** One instance and one consumer per database. All remote mutations pass through this engine. */
@@ -184,11 +187,14 @@ export class Engine {
           history,
         );
       }
+      await this.timeline(link, issue, history);
       const ids = new Set(comments.map((c) => c.id));
       for (const mirror of this.store.mirrors(number)) {
         if (
           mirror.origin === "github" &&
           mirror.key !== `summary:${number}` &&
+          // References are never deleted on GitHub; their mirrors are not comments.
+          !mirror.key.startsWith("timeline:") &&
           !ids.has(mirror.source)
         ) {
           await this.render(
@@ -393,6 +399,44 @@ export class Engine {
     };
     this.store.saveLink(link);
     return { reopened };
+  }
+
+  /**
+   * Mirror references to the issue as bot-owned messages, once each. Bounded to open issues
+   * and recently closed ones; an ETag makes unchanged timelines free. References made before
+   * the mapping started are not posted, so a backfill does not flood old threads.
+   */
+  private async timeline(link: Link, issue: Issue, history: Message[]) {
+    const settings = this.options.timeline;
+    if (!settings) return;
+    if (
+      issue.state === "closed" &&
+      issue.closedAt &&
+      Date.now() - Date.parse(issue.closedAt) >
+        settings.maxAgeDaysClosed * 86400_000
+    )
+      return;
+    const etagKey = `timeline-etag:${issue.number}`;
+    const result = await this.api.timeline(
+      issue.number,
+      this.store.meta(etagKey),
+    );
+    if (!result) return;
+    const started = this.store.meta("started")!;
+    for (const event of result.events) {
+      const key = `timeline:${issue.number}:${event.key}`;
+      if (event.createdAt < started && !this.store.mirror(key)) continue;
+      await this.render(
+        link,
+        key,
+        timelineBody(event),
+        event.url,
+        event.key,
+        history,
+      );
+    }
+    if (result.etag) this.store.setMeta(etagKey, result.etag);
+    else this.store.deleteMeta(etagKey);
   }
 
   private async render(

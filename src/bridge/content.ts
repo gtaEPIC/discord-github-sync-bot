@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Issue, Message } from "./types";
+import { Issue, Message, TimelineEvent } from "./types";
 
 export const hash = (body: string) =>
   createHash("sha256").update(body).digest("hex");
@@ -34,4 +34,13 @@ export function chunks(body: string, url: string): string[] {
 export function missing(error: unknown): boolean {
   const e = error as { status?: number; code?: number };
   return e.status === 404 || e.code === 10003 || e.code === 10008;
+}
+
+/** One bot-owned message per reference. Titles come from GitHub; mentions are disabled on send. */
+export function timelineBody(event: TimelineEvent) {
+  const clean = (text: string) => text.replace(/[\[\]\r\n]/g, " ").trim();
+  const by = event.actor ? ` by **${clean(event.actor)}**` : "";
+  if (event.kind === "crossref")
+    return `Mentioned in ${event.pullRequest ? "pull request" : "issue"} [${event.label}](${event.url})${event.title ? ` ${clean(event.title)}` : ""}${by}`;
+  return `${event.kind === "closed" ? "Closed by" : "Referenced in"} commit [\`${event.label}\`](${event.url})${by}`;
 }

@@ -18,6 +18,7 @@ import {
   Platforms,
   Post,
   ThreadMeta,
+  TimelineEvent,
 } from "./types";
 import { BridgeConfig, DEFAULT_CONFIG } from "./config";
 import { ProjectsClient } from "./projects";
@@ -52,6 +53,25 @@ type Options = {
   projects?: ProjectsClient;
 };
 type Rules = { limit?: "issue" | "comment"; roles?: boolean; source?: Message };
+/** The fields of a timeline event this bridge reads (the API returns a wide union). */
+type RawTimelineEvent = {
+  event?: string;
+  id?: number;
+  created_at?: string;
+  actor?: { login?: string } | null;
+  commit_id?: string | null;
+  commit_url?: string | null;
+  source?: {
+    issue?: {
+      id?: number;
+      number?: number;
+      title?: string;
+      html_url?: string;
+      pull_request?: unknown;
+      repository?: { full_name?: string };
+    };
+  };
+};
 const HOUR = 3600_000;
 
 export class LivePlatforms implements Platforms {
@@ -149,6 +169,7 @@ export class LivePlatforms implements Platforms {
     labels: (string | { name?: string })[];
     locked: boolean;
     created_at: string;
+    closed_at?: string | null;
   }): Issue {
     return {
       number: data.number,
@@ -170,6 +191,7 @@ export class LivePlatforms implements Platforms {
         .filter(Boolean),
       locked: data.locked,
       createdAt: data.created_at,
+      closedAt: data.closed_at ?? null,
     };
   }
   async getIssue(number: number) {
@@ -583,6 +605,72 @@ export class LivePlatforms implements Platforms {
     await this.write(actor, undefined, async (api) => {
       await api.issues.update({ ...this.repo, issue_number: number, state });
     });
+  }
+  async timeline(number: number, etag?: string) {
+    const request = { ...this.repo, issue_number: number, per_page: 100 };
+    let first;
+    try {
+      first = await this.github.issues.listEventsForTimeline({
+        ...request,
+        headers: etag ? { "if-none-match": etag } : {},
+      });
+    } catch (error) {
+      // 304: nothing new, and GitHub does not count it against the rate limit.
+      if ((error as { status?: number }).status === 304) return undefined;
+      throw error;
+    }
+    // The first page's ETag says nothing about later pages: use it only for one-page timelines.
+    const single = !/rel="next"/.test(first.headers.link ?? "");
+    const data = single
+      ? first.data
+      : await this.github.paginate(
+          this.github.issues.listEventsForTimeline,
+          request,
+        );
+    const events: TimelineEvent[] = [];
+    for (const raw of data as RawTimelineEvent[]) {
+      const actor = raw.actor?.login;
+      if (raw.event === "cross-referenced") {
+        const source = raw.source?.issue;
+        if (!source?.id || !source.html_url) continue;
+        const repo = source.repository?.full_name;
+        const here =
+          repo?.toLowerCase() ===
+          `${this.options.owner}/${this.options.repo}`.toLowerCase();
+        events.push({
+          key: `xref:${source.id}`,
+          kind: "crossref",
+          actor,
+          createdAt: raw.created_at ?? "",
+          url: source.html_url,
+          label: `${here || !repo ? "" : repo}#${source.number}`,
+          title: source.title,
+          pullRequest: Boolean(source.pull_request),
+        });
+      } else if (
+        (raw.event === "referenced" || raw.event === "closed") &&
+        raw.commit_id &&
+        raw.id !== undefined
+      ) {
+        const repo = raw.commit_url?.match(
+          /\/repos\/([^/]+\/[^/]+)\/commits\//,
+        )?.[1];
+        const sha = raw.commit_id.slice(0, 7);
+        const here =
+          !repo ||
+          repo.toLowerCase() ===
+            `${this.options.owner}/${this.options.repo}`.toLowerCase();
+        events.push({
+          key: String(raw.id),
+          kind: raw.event === "closed" ? "closed" : "commit",
+          actor,
+          createdAt: raw.created_at ?? "",
+          url: `https://github.com/${repo ?? `${this.options.owner}/${this.options.repo}`}/commit/${raw.commit_id}`,
+          label: here ? sha : `${repo}@${sha}`,
+        });
+      }
+    }
+    return { events, etag: single ? first.headers.etag : undefined };
   }
   async comments(number: number): Promise<Comment[]> {
     const data = await this.github.paginate(this.github.issues.listComments, {

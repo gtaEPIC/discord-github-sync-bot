@@ -351,6 +351,7 @@ export class Runtime {
           worker.api = api;
           worker.engine = new Engine(worker.store, api, mapping.backfill, {
             discordWrites: config.writeMode === "bridge",
+            timeline: config.timeline,
           });
           guilds.add(api.guildId);
           worker.store.enqueue({ type: "scan" }, randomUUID());

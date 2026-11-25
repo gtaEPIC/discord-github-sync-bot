@@ -34,6 +34,11 @@ export interface BridgeConfig {
   closeTags: { tag: string; reason: CloseReason }[];
   /** Projects v2 Status sync. Off when absent; needs the Projects token (Admin -> Connections). */
   status?: StatusConfig;
+  /**
+   * Show commits and other issues or pull requests that reference an issue in its thread.
+   * Off when absent. Closed issues are checked for `maxAgeDaysClosed` days after closing.
+   */
+  timeline?: { maxAgeDaysClosed: number };
 }
 
 export interface StatusConfig {
@@ -73,6 +78,7 @@ const KEYS = [
   "labels",
   "closeTags",
   "status",
+  "timeline",
 ];
 const STATUS_KEYS = [
   "owner",
@@ -256,6 +262,25 @@ export function parseBridgeConfig(value: unknown): Partial<BridgeConfig> {
         } as StatusConfig;
     }
   }
+  if (value.timeline !== undefined) {
+    const timeline = value.timeline;
+    const days = isObject(timeline) ? timeline.maxAgeDaysClosed : undefined;
+    if (
+      !isObject(timeline) ||
+      Object.keys(timeline).some((k) => k !== "maxAgeDaysClosed") ||
+      (days !== undefined &&
+        (!Number.isInteger(days) ||
+          (days as number) < 0 ||
+          (days as number) > 365))
+    )
+      problems.push(
+        "timeline must be an object, with an optional maxAgeDaysClosed from 0 to 365.",
+      );
+    else
+      result.timeline = (
+        days === undefined ? {} : { maxAgeDaysClosed: days }
+      ) as BridgeConfig["timeline"];
+  }
   if (problems.length) throw new ConfigError(problems);
   return result;
 }
@@ -278,6 +303,9 @@ export function resolveConfig(stored: unknown): BridgeConfig {
       ...parsed.status,
       field: parsed.status.field ?? "Status",
       pollSeconds: parsed.status.pollSeconds ?? 120,
+    },
+    timeline: parsed.timeline && {
+      maxAgeDaysClosed: parsed.timeline.maxAgeDaysClosed ?? 14,
     },
   };
 }
