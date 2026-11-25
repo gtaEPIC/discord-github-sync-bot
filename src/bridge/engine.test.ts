@@ -1180,3 +1180,34 @@ describe("backfill preview", () => {
     expect(api.issues.mock.lastCall![0]).toBeDefined();
   });
 });
+
+describe("webhook and bot reports", () => {
+  it("syncs posts and replies the adapter marks as allowed automation, without notices, and never the bridge's own", async () => {
+    const { engine, api, store } = setup({ discordWrites: true });
+    api.notifyBlocked = vi.fn(async () => {});
+    const post = api.addPost({ author: "Game reports", automated: true });
+    const reply = api.addMessage(post.id, "more detail");
+    Object.assign(reply, { author: "Game reports", automated: true });
+    const own = api.addMessage(post.id, "bridge summary", true);
+    await engine.discord(post.id);
+    const link = store.thread(post.id)!;
+    expect(api.createIssue).toHaveBeenCalledOnce();
+    const bodies = api.createComment.mock.calls.map((c) => c[1]);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain("more detail");
+    expect(bodies.join()).not.toContain(own.body);
+    // A refused automated write is held quietly: no reply to the webhook in the thread.
+    const later = api.addMessage(post.id, "held one");
+    Object.assign(later, {
+      automated: true,
+      createdAt: new Date().toISOString(),
+      authorId: "777",
+    });
+    api.createComment.mockRejectedValueOnce(
+      new WriteBlocked("777", "permission", "no access"),
+    );
+    await engine.discord(link.thread);
+    expect(store.health().blocked).toBe(1);
+    expect(api.notifyBlocked).not.toHaveBeenCalled();
+  });
+});

@@ -18,6 +18,13 @@ export interface BridgeConfig {
   writeMode: WriteMode;
   /** Bridge mode only: Discord role IDs allowed to write to GitHub. Empty means anyone who can post in the forum. */
   allowRoles: string[];
+  /**
+   * Bridge mode only: also sync posts and replies made by webhooks in the forum. `true` for
+   * every webhook, or a list of webhook IDs. The bridge's own messages are never synced.
+   */
+  allowWebhooks: boolean | string[];
+  /** Bridge mode only: bot user IDs whose posts and replies are synced like a member's. */
+  allowBots: string[];
   /** Bridge mode only: per-Discord-user limits on new issues and new comments, per rolling hour. 0 disables a limit. */
   rateLimit: { issuesPerHour: number; commentsPerHour: number };
   /**
@@ -59,6 +66,8 @@ export interface StatusConfig {
 export const DEFAULT_CONFIG: BridgeConfig = Object.freeze({
   writeMode: "user",
   allowRoles: [],
+  allowWebhooks: false,
+  allowBots: [],
   rateLimit: Object.freeze({ issuesPerHour: 5, commentsPerHour: 60 }),
   labels: Object.freeze({}),
   closeTags: [],
@@ -74,6 +83,8 @@ export class ConfigError extends Error {
 const KEYS = [
   "writeMode",
   "allowRoles",
+  "allowWebhooks",
+  "allowBots",
   "rateLimit",
   "labels",
   "closeTags",
@@ -122,6 +133,35 @@ export function parseBridgeConfig(value: unknown): Partial<BridgeConfig> {
         "allowRoles must be a list of up to 50 Discord role IDs (strings of digits).",
       );
   }
+  const ids = (list: unknown) =>
+    Array.isArray(list) &&
+    list.length <= 50 &&
+    list.every((id) => typeof id === "string" && /^\d{5,25}$/.test(id));
+  if (value.allowWebhooks !== undefined) {
+    if (typeof value.allowWebhooks === "boolean")
+      result.allowWebhooks = value.allowWebhooks;
+    else if (ids(value.allowWebhooks))
+      result.allowWebhooks = [...new Set(value.allowWebhooks as string[])];
+    else
+      problems.push(
+        "allowWebhooks must be true, false, or a list of up to 50 webhook IDs (strings of digits).",
+      );
+  }
+  if (value.allowBots !== undefined) {
+    if (ids(value.allowBots))
+      result.allowBots = [...new Set(value.allowBots as string[])];
+    else
+      problems.push(
+        "allowBots must be a list of up to 50 Discord bot user IDs (strings of digits).",
+      );
+  }
+  const automation =
+    (result.allowWebhooks !== undefined && result.allowWebhooks !== false) ||
+    Boolean(result.allowBots?.length);
+  if (automation && result.writeMode !== "bridge")
+    problems.push(
+      'allowWebhooks and allowBots need "writeMode": "bridge": webhooks and bots cannot link a GitHub account.',
+    );
   if (value.rateLimit !== undefined) {
     if (!isObject(value.rateLimit))
       problems.push("rateLimit must be an object.");
@@ -296,6 +336,8 @@ export function resolveConfig(stored: unknown): BridgeConfig {
   return {
     writeMode: parsed.writeMode ?? DEFAULT_CONFIG.writeMode,
     allowRoles: parsed.allowRoles ?? [],
+    allowWebhooks: parsed.allowWebhooks ?? false,
+    allowBots: parsed.allowBots ?? [],
     rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...parsed.rateLimit },
     labels: parsed.labels ?? {},
     closeTags: parsed.closeTags ?? [],

@@ -114,6 +114,7 @@ Only needed for the member dashboard. Discord application → **OAuth2** → add
    ```json
    {
      "writeMode": "bridge",
+     "allowWebhooks": true,
      "closeTags": [
        { "tag": "Fixed", "reason": "completed" },
        { "tag": "Won't Fix", "reason": "not_planned" },

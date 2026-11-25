@@ -114,6 +114,35 @@ describe("bridge settings", () => {
     for (const bad of [true, { maxAgeDaysClosed: -1 }, { days: 3 }])
       expect(() => parseBridgeConfig({ timeline: bad })).toThrow(ConfigError);
   });
+  it("validates webhook and bot sources, which need bridge mode", () => {
+    expect(
+      parseBridgeConfig({ writeMode: "bridge", allowWebhooks: true }),
+    ).toEqual({ writeMode: "bridge", allowWebhooks: true });
+    expect(
+      parseBridgeConfig({
+        writeMode: "bridge",
+        allowWebhooks: ["123456789", "123456789"],
+        allowBots: ["987654321"],
+      }),
+    ).toMatchObject({ allowWebhooks: ["123456789"], allowBots: ["987654321"] });
+    expect(resolveConfig({})).toMatchObject({
+      allowWebhooks: false,
+      allowBots: [],
+    });
+    expect(() => parseBridgeConfig({ allowWebhooks: true })).toThrow(
+      /need "writeMode": "bridge"/,
+    );
+    expect(() =>
+      parseBridgeConfig({ writeMode: "bridge", allowWebhooks: "yes" }),
+    ).toThrow(ConfigError);
+    expect(() =>
+      parseBridgeConfig({ writeMode: "bridge", allowBots: ["my-bot"] }),
+    ).toThrow(ConfigError);
+    // Switching them off is fine in user mode.
+    expect(parseBridgeConfig({ allowWebhooks: false })).toEqual({
+      allowWebhooks: false,
+    });
+  });
   it("never resolves corrupt stored settings to bridge mode", () => {
     expect(resolveConfig({ writeMode: "bridge", typo: true }).writeMode).toBe(
       "user",

@@ -142,7 +142,7 @@ The forum is a publishing boundary: human-created posts and replies are eligible
 ## Sync behavior
 
 - New GitHub issues create forum posts. Human-created forum posts create GitHub issues.
-- Replies sync both ways with attribution and source links; Discord bot/webhook messages are excluded.
+- Replies sync both ways with attribution and source links; Discord bot/webhook messages are excluded, except (fork, bridge mode) those the mapping allows with `"allowWebhooks": true` (or a list of webhook IDs) and `"allowBots": ["<bot user ID>"]`. Allowed webhooks and bots are attributed by their display name, skip `allowRoles` and the per-user rate limit (one webhook relays many reporters), and get no notices. The bridge's own messages are never synced, even if listed.
 - Edit the original reply on its source platform to update its mirror.
 - GitHub title, body, labels, lock state, and open/closed state update the forum thread and bot-owned summary.
 - **Managed tags** (fork): a forum tag is paired with the repository label of the same name (case-insensitive) or with the label named in the mapping's `labels` setting, for example `{ "labels": { "Feature": "enhancement" } }`. Only managed tags and labels are synced; other tags and labels are never touched, and labels are never created.

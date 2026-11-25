@@ -43,8 +43,11 @@ export interface Message {
   body: string;
   url: string;
   author: string;
+  /** Excluded from sync: a bot or webhook that is not allowed, or the bridge itself. */
   bot: boolean;
   own?: boolean;
+  /** Synced, but posted by an allowed webhook or bot: no role check, rate limit or notices. */
+  automated?: boolean;
   authorId?: string;
   createdAt?: string;
 }

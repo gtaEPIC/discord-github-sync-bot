@@ -174,17 +174,22 @@ export class Runtime {
       );
       const message = (m: {
         channelId: string;
-        author?: { bot: boolean } | null;
+        webhookId?: string | null;
+        author?: { id: string; bot: boolean } | null;
         channel: { isThread(): boolean; parentId?: string | null };
       }) => {
-        if (m.author?.bot) return;
-        enqueue(
-          route(
-            m.channelId,
-            m.channel.isThread() ? m.channel.parentId : undefined,
-          ),
-          { type: "discord", thread: m.channelId },
+        const worker = route(
+          m.channelId,
+          m.channel.isThread() ? m.channel.parentId : undefined,
         );
+        // Bots and webhooks wake the queue only when the mapping syncs them; never the bridge.
+        if (
+          (m.author?.bot || m.webhookId) &&
+          (!m.author ||
+            worker?.api?.classify(m.author, m.webhookId).bot !== false)
+        )
+          return;
+        enqueue(worker, { type: "discord", thread: m.channelId });
       };
       client.on(Events.MessageCreate, message);
       client.on(Events.MessageUpdate, (_old, m) => message(m));

@@ -315,7 +315,9 @@ export class LivePlatforms implements Platforms {
         "Bridge write mode is not ready: the GitHub App bot identity or write access is missing. This change has not been sent.",
       );
     const allow = this.config.allowRoles;
-    if (rules.roles && allow.length) {
+    // Allowed webhooks and bots have no roles, and one webhook carries many reporters.
+    const automated = Boolean(rules.source?.automated);
+    if (rules.roles && allow.length && !automated) {
       const roles = await this.memberRoles(discordId);
       if (!roles.some((id) => allow.includes(id)))
         throw new WriteBlocked(
@@ -333,7 +335,7 @@ export class LivePlatforms implements Platforms {
       started && rules.source?.createdAt && rules.source.createdAt < started,
     );
     const key =
-      rules.limit && max > 0 && !backfill
+      rules.limit && max > 0 && !backfill && !automated
         ? `${rules.limit}:${discordId}`
         : undefined;
     const recent = key
@@ -807,9 +809,30 @@ export class LivePlatforms implements Platforms {
       author: message.author.globalName ?? message.author.username,
       authorId: message.author.id,
       createdAt: message.createdAt?.toISOString(),
-      bot: message.author.bot || Boolean(message.webhookId),
-      own: message.author.id === this.client.user?.id,
+      ...this.classify(message.author, message.webhookId),
     };
+  }
+  /**
+   * Whether a message is synced. Members always are; bots and webhooks only when the mapping
+   * allows them; the bridge's own messages never are (that is the echo guard).
+   */
+  classify(
+    author: { id: string; bot?: boolean },
+    webhookId?: string | null,
+  ): { bot: boolean; own: boolean; automated?: true } {
+    const own = author.id === this.client.user?.id;
+    // An incoming webhook posts as itself; an interaction reply has the bot as author.
+    const webhook = Boolean(webhookId) && author.id === webhookId;
+    if (!own && !author.bot && !webhookId) return { bot: false, own };
+    const { allowWebhooks, allowBots } = this.config;
+    const allowed =
+      !own &&
+      this.bridgeMode &&
+      (webhook
+        ? allowWebhooks === true ||
+          (Array.isArray(allowWebhooks) && allowWebhooks.includes(author.id))
+        : allowBots.includes(author.id));
+    return allowed ? { bot: false, own, automated: true } : { bot: true, own };
   }
   private async post(channel: ThreadChannel): Promise<Post> {
     const starter = await channel.fetchStarterMessage({ force: true });

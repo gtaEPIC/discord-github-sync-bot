@@ -184,6 +184,62 @@ describe("bridge write mode", () => {
     ]);
     expect(calls.every((c) => c.token === "installation-write")).toBe(true);
   });
+  it("syncs only allowed webhooks and bots, never the bridge itself", async () => {
+    const own = { id: "555555555", bot: true };
+    const member = { id: "123123123" };
+    const hook = { id: "777777777", bot: true };
+    const otherBot = { id: "888888888", bot: true };
+    const all = setup({ writeMode: "bridge", allowWebhooks: true });
+    Object.assign(all.api, { client: { user: { id: "555555555" } } });
+    expect(all.api.classify(member)).toEqual({ bot: false, own: false });
+    expect(all.api.classify(hook, "777777777")).toEqual({
+      bot: false,
+      own: false,
+      automated: true,
+    });
+    // An interaction reply carries a webhook id but is authored by the bot: not a webhook.
+    expect(all.api.classify(otherBot, "999999999").bot).toBe(true);
+    expect(all.api.classify(otherBot).bot).toBe(true);
+    expect(all.api.classify(own).bot).toBe(true);
+    expect(all.api.classify(own, "555555555").bot).toBe(true);
+    const listed = setup({
+      writeMode: "bridge",
+      allowWebhooks: ["777777777"],
+      allowBots: ["888888888", "555555555"],
+    });
+    Object.assign(listed.api, { client: { user: { id: "555555555" } } });
+    expect(listed.api.classify(hook, "777777777").bot).toBe(false);
+    expect(
+      listed.api.classify({ id: "778888888", bot: true }, "778888888").bot,
+    ).toBe(true);
+    expect(listed.api.classify(otherBot).bot).toBe(false);
+    // Even when listed, the bridge's own messages are never synced.
+    expect(listed.api.classify(own).bot).toBe(true);
+    // User mode never syncs automation (corrupt settings fall back to user mode).
+    const user = setup({ writeMode: "user" });
+    expect(user.api.classify(hook, "777777777").bot).toBe(true);
+  });
+  it("lets an allowed webhook skip the role list and the per-user rate limit", async () => {
+    const { api } = setup(
+      {
+        writeMode: "bridge",
+        allowWebhooks: true,
+        allowRoles: ["111111"],
+        rateLimit: { issuesPerHour: 1, commentsPerHour: 1 },
+      },
+      [],
+    );
+    const hook = { ...source, authorId: "777", automated: true as const };
+    for (let i = 0; i < 3; i++) {
+      await api.createIssue({ ...post, starter: hook }, "marker");
+      await api.createComment(1, "body", hook);
+    }
+    expect(calls).toHaveLength(6);
+    // A member without the role is still held.
+    await expect(api.createComment(1, "body", source)).rejects.toMatchObject({
+      reason: "role",
+    });
+  });
   it("leaves user mode on the linked-account path", async () => {
     const { api } = setup({ writeMode: "user" });
     await api.createComment(1, "body", source);

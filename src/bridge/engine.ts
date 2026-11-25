@@ -554,6 +554,7 @@ export class Engine {
     // Role refusals stay quiet: anyone may post in the forum, but only some roles reach GitHub.
     if (
       error.reason !== "role" &&
+      !source?.automated &&
       source?.createdAt &&
       Date.now() - Date.parse(source.createdAt) < 10 * 60_000 &&
       Date.now() - Number(this.store.meta(noticeKey) ?? 0) > 10 * 60_000
