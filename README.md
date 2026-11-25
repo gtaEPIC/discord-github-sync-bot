@@ -156,7 +156,7 @@ The forum is a publishing boundary: human-created posts and replies are eligible
 - Deleted source comments/messages become deletion notices in their mirrors. Deleting an entire thread/issue disables its mapping; it does not delete its counterpart or recreate the removed object.
 - Outbound Discord messages disable mentions, including edits.
 
-**Archiving is not closure.** Inactivity auto-archive never changes GitHub state. Use `/issue close` or `/issue reopen` (or, in bridge mode, a close tag). Inside a synced thread the repository is inferred; elsewhere specify `repository:owner/repo` and `number:123` when multiple repositories are mapped. Close/reopen require a linked GitHub account with repository permission (user mode only), plus access to the forum and Manage Threads there or one of its configured manager roles. `/issue status` shows the linked issue.
+**Archiving is not closure.** Inactivity auto-archive never changes GitHub state. Use `/issue close` or `/issue reopen` (or, in bridge mode, a close tag). Inside a synced thread the repository is inferred; elsewhere specify `repository:owner/repo` and `number:123` when multiple repositories are mapped. Close/reopen require a linked GitHub account with repository permission (user mode only), plus access to the forum and Manage Threads there or one of its configured manager roles. `/issue status` shows the linked issue. `/issue open` (fork), run inside a forum post that has no issue, creates and links one: for an old post, or a bot or webhook post the mapping does not sync. It needs Manage Threads or a manager role; the bridge's own posts are refused.
 
 ### Projects token (fork)
 

@@ -238,8 +238,12 @@ export class Runtime {
                 `${w.mapping.owner}/${w.mapping.repo}`.toLowerCase() ===
                   repository),
           );
+          const parent = interaction.channel?.isThread()
+            ? interaction.channel.parentId
+            : undefined;
           const worker =
             candidates.find((w) => w.store.thread(interaction.channelId)) ??
+            candidates.find((w) => parent && w.mapping.channel === parent) ??
             (candidates.length === 1 ? candidates[0] : undefined);
           if (!worker?.api) {
             await interaction.reply({
@@ -393,6 +397,13 @@ export class Runtime {
                 ),
             ),
         );
+      command.addSubcommand((sub) =>
+        sub
+          .setName("open")
+          .setDescription(
+            "Create the GitHub issue for this post if the bridge missed it",
+          ),
+      );
       for (const guild of client.guilds.cache.keys()) {
         await client.application!.commands.create(
           githubCommand.toJSON(),

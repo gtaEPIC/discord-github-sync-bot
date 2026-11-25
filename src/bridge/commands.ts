@@ -20,6 +20,43 @@ export async function issueCommand(
     await interaction.editReply("You do not have access to the issue forum.");
     return;
   }
+  const manager = () =>
+    Boolean(
+      forum.permissionsFor(member)?.has(PermissionFlagsBits.ManageThreads),
+    ) || options.roles.some((id) => member.roles.cache.has(id));
+  if (interaction.options.getSubcommand() === "open") {
+    // Create the issue for a post the bridge did not pick up (an old post, or a bot's).
+    const channel = interaction.channel;
+    if (!channel?.isThread() || channel.parentId !== options.forum) {
+      await interaction.editReply(
+        "Use /issue open inside a post in the issue forum.",
+      );
+      return;
+    }
+    if (!manager()) {
+      await interaction.editReply(
+        "Opening an issue for a post requires Manage Threads in the forum or a configured manager role.",
+      );
+      return;
+    }
+    const existing = store.thread(channel.id);
+    if (existing) {
+      await interaction.editReply(
+        existing.disabled
+          ? `This post was unlinked from #${existing.issue} and cannot be linked again.`
+          : `This post is already linked to #${existing.issue}.`,
+      );
+      return;
+    }
+    store.enqueue(
+      { type: "open", thread: channel.id, actor: interaction.user.id },
+      randomUUID(),
+    );
+    await interaction.editReply(
+      "Queued. The GitHub issue will be created and linked to this post shortly.",
+    );
+    return;
+  }
   const number = interaction.options.getInteger("number");
   const link = number
     ? store.link(number)
@@ -40,10 +77,7 @@ export async function issueCommand(
   }
   if (!["close", "reopen"].includes(action))
     throw new Error("Unknown issue command");
-  if (
-    !forum.permissionsFor(member)?.has(PermissionFlagsBits.ManageThreads) &&
-    !options.roles.some((id) => member.roles.cache.has(id))
-  ) {
+  if (!manager()) {
     await interaction.editReply(
       "Closing/reopening requires Manage Threads in the forum or a configured manager role.",
     );

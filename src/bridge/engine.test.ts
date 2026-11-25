@@ -1211,3 +1211,27 @@ describe("webhook and bot reports", () => {
     expect(api.notifyBlocked).not.toHaveBeenCalled();
   });
 });
+
+describe("/issue open", () => {
+  it("creates the issue for a skipped post, bot posts included, but never for the bridge's own", async () => {
+    const { engine, api, store } = setup({ discordWrites: true });
+    store.setMeta("started", "2026-06-01T00:00:00.000Z");
+    const old = api.addPost();
+    old.createdAt = "2026-01-01T00:00:00.000Z";
+    await engine.run({ type: "open", thread: old.id, actor: "1" });
+    expect(store.thread(old.id)).toBeDefined();
+    const fromBot = api.addPost({ bot: true, author: "Game reports" });
+    await engine.discord(fromBot.id);
+    expect(store.thread(fromBot.id)).toBeUndefined();
+    await engine.run({ type: "open", thread: fromBot.id, actor: "1" });
+    expect(store.thread(fromBot.id)).toBeDefined();
+    expect(api.createIssue.mock.lastCall![0].starter).toMatchObject({
+      bot: false,
+      automated: true,
+    });
+    const own = api.addPost({ bot: true, own: true });
+    await engine.run({ type: "open", thread: own.id, actor: "1" });
+    expect(store.thread(own.id)).toBeUndefined();
+    expect(api.createIssue).toHaveBeenCalledTimes(2);
+  });
+});

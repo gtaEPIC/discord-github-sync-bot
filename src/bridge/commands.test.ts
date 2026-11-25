@@ -17,6 +17,8 @@ function setup({
   role = false,
   number = null as number | null,
   action = "close",
+  channel = "thread",
+  parent = "forum" as string | null,
 } = {}) {
   const store = new Store(":memory:", "test");
   stores.push(store);
@@ -32,7 +34,12 @@ function setup({
   ]);
   const interaction = {
     user: { id: "user" },
-    channelId: number ? "other-channel" : "thread",
+    channelId: number ? "other-channel" : channel,
+    channel: {
+      id: number ? "other-channel" : channel,
+      isThread: () => parent !== null,
+      parentId: parent,
+    },
     guild: {
       members: {
         fetch: vi.fn(async () => ({
@@ -97,5 +104,56 @@ describe("issue command permissions", () => {
       issue: 42,
       state: "open",
     });
+  });
+});
+
+describe("/issue open", () => {
+  it("queues the issue for an unlinked post when a manager asks", async () => {
+    const { run, store, interaction } = setup({
+      manage: true,
+      action: "open",
+      channel: "missed-post",
+    });
+    await run();
+    expect(store.next()?.task).toEqual({
+      type: "open",
+      thread: "missed-post",
+      actor: "user",
+    });
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.stringContaining("Queued"),
+    );
+  });
+  it("refuses members without Manage Threads or a manager role", async () => {
+    const { run, store, interaction } = setup({
+      action: "open",
+      channel: "missed-post",
+    });
+    await run();
+    expect(store.health().pending).toBe(0);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.stringContaining("requires Manage Threads"),
+    );
+  });
+  it("says so when the post is already linked, and works only in the forum's posts", async () => {
+    const linked = setup({ manage: true, action: "open" });
+    await linked.run();
+    expect(linked.store.health().pending).toBe(0);
+    expect(linked.interaction.editReply).toHaveBeenCalledWith(
+      "This post is already linked to #42.",
+    );
+    for (const options of [{ parent: "other-forum" }, { parent: null }]) {
+      const elsewhere = setup({
+        manage: true,
+        action: "open",
+        channel: "missed-post",
+        ...options,
+      });
+      await elsewhere.run();
+      expect(elsewhere.store.health().pending).toBe(0);
+      expect(elsewhere.interaction.editReply).toHaveBeenCalledWith(
+        "Use /issue open inside a post in the issue forum.",
+      );
+    }
   });
 });

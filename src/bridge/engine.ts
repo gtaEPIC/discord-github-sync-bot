@@ -40,6 +40,8 @@ export class Engine {
         return this.github(task.issue);
       case "discord":
         return this.discord(task.thread);
+      case "open":
+        return this.discord(task.thread, true);
       case "state": {
         const link = this.store.link(task.issue);
         if (!link || link.disabled) return;
@@ -569,7 +571,8 @@ export class Engine {
     return true;
   }
 
-  async discord(thread: string) {
+  /** `force`: a manager ran /issue open, so a post the bridge skipped gets its issue too. */
+  async discord(thread: string, force = false) {
     let link = this.store.thread(thread);
     if (link?.disabled) return;
     let post;
@@ -584,7 +587,14 @@ export class Engine {
       throw error;
     }
     if (!link) {
-      if (post.starter.bot) return;
+      // The bridge's own posts never become issues, even when asked.
+      if (post.starter.bot && (!force || post.starter.own)) return;
+      if (post.starter.bot)
+        // A bot or webhook post: the manager's command stands in for the allow-list.
+        post = {
+          ...post,
+          starter: { ...post.starter, bot: false, automated: true },
+        };
       const marker = issueMarker(thread);
       const existing = (await this.api.issues()).find(
         (i) =>

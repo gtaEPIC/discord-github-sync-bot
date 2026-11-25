@@ -110,6 +110,8 @@ export type Task =
   | { type: "discord"; thread: string }
   | { type: "state"; issue: number; state: "open" | "closed"; actor?: string }
   | { type: "scan" }
+  /** /issue open: create the issue for this post even if the bridge skipped it. */
+  | { type: "open"; thread: string; actor?: string }
   | { type: "project" }
   | { type: "unlink"; thread: string };
 export interface Platforms {
