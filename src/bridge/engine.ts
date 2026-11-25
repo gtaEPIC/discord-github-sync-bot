@@ -71,8 +71,12 @@ export class Engine {
     const started = this.store.meta("started")!;
     // Capture the start of the scan and overlap cursors so updates during pagination are replayed.
     const checkpoint = new Date(Date.now() - 60_000).toISOString();
-    const since =
-      this.store.meta("githubScan") ?? (this.backfill ? undefined : started);
+    // Backfill reads every issue once, even when it was switched on after earlier scans.
+    const full = this.backfill && !this.store.meta("backfilled");
+    const since = full
+      ? undefined
+      : (this.store.meta("githubScan") ??
+        (this.backfill ? undefined : started));
     // Retry held /issue close|reopen commands; the meta key dedupes them across scans.
     for (const [key, task] of this.store.metaEntries("held:state:"))
       this.store.enqueue(JSON.parse(task) as Task, key);
@@ -102,7 +106,39 @@ export class Engine {
         this.store.enqueue({ type: "discord", thread: link.thread });
       }
     this.store.setMeta("githubScan", checkpoint);
+    if (full) this.store.setMeta("backfilled", checkpoint);
     this.store.prune();
+  }
+
+  /**
+   * What a backfill would import, without writing anything: open issues without a post and
+   * active (unarchived) human posts without an issue, both from before the mapping started.
+   */
+  async backfillPreview() {
+    const started = this.store.meta("started")!;
+    const [issues, posts] = await Promise.all([
+      this.api.issues(),
+      this.api.posts(),
+    ]);
+    return {
+      issues: issues
+        .filter(
+          (i) =>
+            i.state === "open" &&
+            i.createdAt < started &&
+            !this.store.link(i.number),
+        )
+        .map((i) => ({ number: i.number, title: i.title, url: i.url })),
+      posts: posts
+        .filter(
+          (p) =>
+            !p.archived &&
+            !p.starter.bot &&
+            p.createdAt < started &&
+            !this.store.thread(p.id),
+        )
+        .map((p) => ({ id: p.id, title: p.title, url: p.starter.url })),
+    };
   }
 
   async github(number: number) {

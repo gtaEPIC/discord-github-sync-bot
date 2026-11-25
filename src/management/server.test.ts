@@ -547,6 +547,49 @@ describe("management API", () => {
       ).status,
     ).toBe(400);
   });
+  it("previews an import read-only, then switches it on once", async () => {
+    const { publicApp, auth, headers, store, control } = setup();
+    store.saveMapping({
+      id: "m1",
+      owner: "org",
+      repo: "one",
+      channel: "123456",
+      backfill: false,
+      enabled: true,
+      roles: [],
+    });
+    const cookie = auth();
+    const preview = () =>
+      request(publicApp)
+        .get("/api/mappings/m1/backfill-preview")
+        .set({ ...headers, Cookie: cookie });
+    expect((await preview()).status).toBe(404);
+    const backfillPreview = vi.fn(async () => ({
+      issues: [],
+      posts: [{ id: "1", title: "Old report", url: "https://discord.com/x" }],
+    }));
+    control.worker.mockReturnValue({ engine: { backfillPreview } });
+    const shown = await preview();
+    expect(shown.body).toMatchObject({
+      backfill: false,
+      postCount: 1,
+      issueCount: 0,
+    });
+    expect(store.mapping("m1")!.backfill).toBe(false);
+    const start = () =>
+      request(publicApp)
+        .post("/api/mappings/m1/backfill")
+        .set({ ...headers, Cookie: cookie })
+        .send({});
+    expect((await start()).status).toBe(200);
+    expect(store.mapping("m1")).toMatchObject({
+      backfill: true,
+      enabled: true,
+    });
+    expect(control.reload).toHaveBeenCalled();
+    expect(JSON.stringify(store.activity())).toContain("imported existing");
+    expect((await start()).status).toBe(400);
+  });
   it("stores a validated Projects token write-only for admins", async () => {
     const { publicApp, auth, headers, store } = setup();
     const send = (token: string, cookie?: string) =>

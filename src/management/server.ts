@@ -767,6 +767,35 @@ export function createManagementServer(
       res.json({ ok: true, bridge });
     }),
   );
+  app.get(
+    "/api/mappings/:id/backfill-preview",
+    action(async (req, res) => {
+      const mapping = store.mapping(String(req.params.id));
+      const engine = mapping && runtime.worker(mapping.id)?.engine;
+      if (!mapping || !engine)
+        throw new PublicError("Mapping is not initialized.", 404);
+      const preview = await engine.backfillPreview();
+      res.json({
+        backfill: mapping.backfill,
+        issueCount: preview.issues.length,
+        postCount: preview.posts.length,
+        issues: preview.issues.slice(0, 200),
+        posts: preview.posts.slice(0, 200),
+      });
+    }),
+  );
+  app.post(
+    "/api/mappings/:id/backfill",
+    action((req, res) => {
+      const mapping = store.mapping(String(req.params.id));
+      if (!mapping) throw new PublicError("Mapping not found.", 404);
+      if (mapping.backfill) throw new PublicError("Import is already on.");
+      store.saveMapping({ ...mapping, backfill: true });
+      store.audit("admin", "imported existing issues and posts", mapping);
+      void runtime.reload();
+      res.json({ ok: true });
+    }),
+  );
   app.post(
     "/api/projects-token",
     action(async (req, res) => {

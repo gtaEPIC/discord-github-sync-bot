@@ -157,10 +157,11 @@ Each phase ends with typecheck, tests, build, docker build and smoke green, then
 - Acceptance: a commit that references `#N` shows up once in the thread; a cross-reference from another issue shows up once; none repeat after restart.
 
 ### Phase 6: Deploy to server2
+- [x] Code and docs (2026-11-25): backfill preview (`GET /api/mappings/:id/backfill-preview`, read-only) and a one-way **Import…** switch (`POST /api/mappings/:id/backfill`; the next scan reads every issue once via `meta backfilled`), so a mapping is created without import, previewed, then imported. `DEPLOY.md` runbook (GHCR tag, Komodo stack, tunnel route, admin setup, Discord bot with permission integer 292057844736, GitHub App, machine account for the Projects token, forum tags, staging checks, import, updates and backups). Fixed `image-build.yml` never tagging `latest` (`is_default_branch` is false on tag pushes).
 - [ ] Komodo stack: image from GHCR, `bot-data` volume, `.env` with `PUBLIC_URL`, port bound to loopback or tunnel network only.
 - [ ] Cloudflare Tunnel route for the hostname; confirm `/github-webhook` is reachable without Access/challenge; `/admin` stays protected.
 - [ ] Create the Discord bot (Message Content Intent; permissions: View Channel, Send Messages, Send Messages in Threads, Read Message History, Manage Threads) and the GitHub App (Issues r/w, Metadata read; webhook events: Issues and Issue comments only, since a user-owned Project has no webhook), plus the machine account's classic PAT (`project` + `repo`) for Projects calls (D7): create the account, invite it as a collaborator on the repo and the Project (write access), and save its token under Admin -> Connections -> Projects token.
-- [ ] Map the Ry-Transit repo to the forum. Decide backfill first (Q6).
+- [ ] Map the Ry-Transit repo to the forum, without import; then **Import…** preview and import (Q6). Staging first: a test forum with `gtaEPIC/ry-bridge-spike` and the "Bridge spike" board.
 - [ ] Backup note: stop the service, then copy the whole data volume including `master.key` and any `-wal`/`-shm` files.
 
 ## 6. Risks

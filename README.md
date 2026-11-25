@@ -12,8 +12,9 @@ This is a hard fork of [snick-m/discord-github-sync-bot](https://github.com/snic
 - Two-way title and tag/label sync, plus close tags (for example `Fixed`) that close the issue.
 - GitHub Projects v2 Status to and from a Discord status tag, by polling.
 - Commit and cross-reference notices in the thread.
+- An **Import…** preview on each mapping: see which existing posts and issues would be imported before anything is created.
 
-The rest of this README describes upstream behaviour until each phase lands.
+All phases are in; the sections marked "(fork)" below describe the additions. To deploy with Docker, Komodo and a Cloudflare Tunnel, follow [DEPLOY.md](DEPLOY.md).
 
 ## Manage through the web page
 

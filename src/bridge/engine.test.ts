@@ -1135,3 +1135,48 @@ describe("timeline references", () => {
     expect(api.timeline).not.toHaveBeenCalled();
   });
 });
+
+describe("backfill preview", () => {
+  it("lists what an import would create without writing, and the import then reads every issue once", async () => {
+    const { store, api, engine } = setup();
+    store.setMeta("started", "2026-06-01T00:00:00.000Z");
+    const old = "2026-01-01T00:00:00.000Z";
+    const oldIssue = api.addIssue({ title: "Old bug", createdAt: old });
+    api.addIssue({ title: "Old closed", createdAt: old, state: "closed" });
+    const linkedIssue = api.addIssue({ createdAt: old });
+    store.saveLink({
+      issue: linkedIssue.number,
+      thread: "999",
+      starter: "999",
+      origin: "github",
+    });
+    const active = api.addPost();
+    active.title = "Old report";
+    active.createdAt = old;
+    const archived = api.addPost();
+    archived.createdAt = old;
+    archived.archived = true;
+    const botPost = api.addPost({ bot: true });
+    botPost.createdAt = old;
+    const before = { posts: api.createPost.mock.calls.length };
+    const preview = await engine.backfillPreview();
+    expect(preview.issues.map((i) => i.title)).toEqual(["Old bug"]);
+    expect(preview.posts.map((p) => p.title)).toEqual(["Old report"]);
+    expect(api.createIssue).not.toHaveBeenCalled();
+    expect(api.createPost.mock.calls.length).toBe(before.posts);
+
+    // Import switched on after earlier incremental scans: one full read, then incremental.
+    store.setMeta("githubScan", "2026-06-02T00:00:00.000Z");
+    const importing = new Engine(store, api, true);
+    await importing.scan();
+    expect(api.issues).toHaveBeenLastCalledWith(undefined);
+    const queued = [];
+    for (let job; (job = store.next()); store.complete(job.id))
+      queued.push(job.task);
+    expect(queued).toContainEqual({ type: "github", issue: oldIssue.number });
+    expect(queued).toContainEqual({ type: "discord", thread: active.id });
+    expect(queued).not.toContainEqual({ type: "discord", thread: archived.id });
+    await importing.scan();
+    expect(api.issues.mock.lastCall![0]).toBeDefined();
+  });
+});
