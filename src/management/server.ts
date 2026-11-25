@@ -768,6 +768,27 @@ export function createManagementServer(
     }),
   );
   app.get(
+    "/api/mappings/:id/settings-choices",
+    action(async (req, res) => {
+      const mapping = store.mapping(String(req.params.id));
+      if (!mapping) throw new PublicError("Mapping not found.", 404);
+      // Suggestions only: a mapping that is not running yet still gets an editor.
+      const api = runtime.worker(mapping.id)?.api;
+      res.json(
+        api
+          ? await api.settingsChoices()
+          : {
+              tags: [],
+              roles: [],
+              labels: [],
+              webhooks: [],
+              bots: [],
+              statusOptions: [],
+            },
+      );
+    }),
+  );
+  app.get(
     "/api/mappings/:id/backfill-preview",
     action(async (req, res) => {
       const mapping = store.mapping(String(req.params.id));

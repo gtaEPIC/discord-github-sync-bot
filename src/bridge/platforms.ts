@@ -766,6 +766,53 @@ export class LivePlatforms implements Platforms {
     }
     return { events, etag: single ? first.headers.etag : undefined };
   }
+  /**
+   * Names the settings editor offers as choices. Each part is best effort: one that cannot be
+   * read (no Manage Webhooks, no Projects token) is left empty and the editor takes free text.
+   */
+  async settingsChoices() {
+    const guild = this.forum.guild;
+    const settle = async <T>(read: () => Promise<T[]> | T[]) => {
+      try {
+        return await read();
+      } catch {
+        return [] as T[];
+      }
+    };
+    const [labels, webhooks, statusOptions] = await Promise.all([
+      settle(async () =>
+        (
+          await this.github.paginate(this.github.issues.listLabelsForRepo, {
+            ...this.repo,
+            per_page: 100,
+          })
+        ).map((l) => l.name),
+      ),
+      settle(async () =>
+        (await this.forum.fetchWebhooks())
+          .filter((w) => w.isIncoming())
+          .map((w) => ({ id: w.id, name: w.name })),
+      ),
+      settle(() => this.options.projects?.optionNames() ?? []),
+    ]);
+    return {
+      tags: this.forum.availableTags.map((t) => ({
+        name: t.name,
+        moderated: t.moderated,
+      })),
+      roles: [...guild.roles.cache.values()]
+        .filter((r) => r.id !== guild.id && !r.managed)
+        .sort((a, b) => b.position - a.position)
+        .map((r) => ({ id: r.id, name: r.name })),
+      labels,
+      webhooks,
+      // Bots seen by this process; others can still be added by ID.
+      bots: [...guild.members.cache.values()]
+        .filter((m) => m.user.bot && m.id !== this.client.user?.id)
+        .map((m) => ({ id: m.id, name: m.user.username })),
+      statusOptions,
+    };
+  }
   /** `#12` in this repository, `owner/repo#12` elsewhere. */
   private refLabel(repo: string | undefined, number: number | undefined) {
     const here =

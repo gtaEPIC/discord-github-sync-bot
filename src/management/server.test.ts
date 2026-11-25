@@ -547,6 +547,40 @@ describe("management API", () => {
       ).status,
     ).toBe(400);
   });
+  it("offers settings choices to signed-in admins, empty while the mapping is not running", async () => {
+    const { publicApp, auth, headers, store, control } = setup();
+    store.saveMapping({
+      id: "m1",
+      owner: "org",
+      repo: "one",
+      channel: "123456",
+      backfill: false,
+      enabled: true,
+      roles: [],
+    });
+    const choices = () =>
+      request(publicApp)
+        .get("/api/mappings/m1/settings-choices")
+        .set({ ...headers, Cookie: auth() });
+    expect(
+      (await request(publicApp).get("/api/mappings/m1/settings-choices"))
+        .status,
+    ).toBe(401);
+    expect((await choices()).body).toMatchObject({ tags: [], labels: [] });
+    const settingsChoices = vi.fn(async () => ({
+      tags: [{ name: "Fixed", moderated: true }],
+      roles: [],
+      labels: ["bug"],
+      webhooks: [],
+      bots: [],
+      statusOptions: ["Backlog"],
+    }));
+    control.worker.mockReturnValue({ api: { settingsChoices } });
+    expect((await choices()).body).toMatchObject({
+      tags: [{ name: "Fixed", moderated: true }],
+      labels: ["bug"],
+    });
+  });
   it("previews an import read-only, then switches it on once", async () => {
     const { publicApp, auth, headers, store, control } = setup();
     store.saveMapping({

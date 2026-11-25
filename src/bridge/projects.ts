@@ -230,6 +230,11 @@ export class ProjectsClient {
     return { id: issue.id, item };
   }
 
+  /** The Status field's option names, for the settings editor. */
+  async optionNames() {
+    return (await this.resolve()).options.map((o) => o.name);
+  }
+
   /**
    * An issue's Status moves on any board, keyed by event id (the REST timeline has no
    * details), and the token's own login: moves made with it came from the bridge.
