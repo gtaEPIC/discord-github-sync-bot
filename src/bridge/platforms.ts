@@ -21,6 +21,8 @@ import {
   IssueChange,
   Message,
   MetaChange,
+  Milestone,
+  MilestoneIssue,
   Platforms,
   Post,
   ThreadMeta,
@@ -523,6 +525,50 @@ export class LivePlatforms implements Platforms {
   }
   async projectItems() {
     return this.projects?.scan();
+  }
+  /** The Projects board for the stream overlay: cached up to the poll interval, undefined when Status sync is off. */
+  async projectBoard() {
+    return this.projects?.board();
+  }
+  async milestones(): Promise<Milestone[]> {
+    const data = await this.github.paginate(this.github.issues.listMilestones, {
+      ...this.repo,
+      state: "all",
+      per_page: 100,
+    });
+    return data.map((m) => ({
+      number: m.number,
+      title: m.title,
+      state: m.state === "closed" ? "closed" : "open",
+      dueOn: m.due_on ?? null,
+      url: m.html_url,
+    }));
+  }
+  async milestoneIssues(milestone: number): Promise<MilestoneIssue[]> {
+    const data = await this.github.paginate(this.github.issues.listForRepo, {
+      ...this.repo,
+      milestone: String(milestone),
+      state: "all",
+      per_page: 100,
+    });
+    return data
+      .filter((i) => !i.pull_request)
+      .map((i) => ({
+        number: i.number,
+        title: i.title,
+        url: i.html_url,
+        state: i.state === "closed" ? "closed" : "open",
+        stateReason: i.state_reason ?? null,
+        labels: i.labels.flatMap((l) =>
+          typeof l === "string"
+            ? [{ name: l, color: "" }]
+            : l.name
+              ? [{ name: l.name, color: l.color ?? "" }]
+              : [],
+        ),
+        assignees: (i.assignees ?? []).map((a) => a.login),
+        closedAt: i.closed_at ?? null,
+      }));
   }
   async setProjectStatus(number: number, status: string | null) {
     if (!this.projects)

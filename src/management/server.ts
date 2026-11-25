@@ -12,6 +12,12 @@ import { html, userHtml, css, js } from "./ui";
 
 import { GitHubInstallations } from "./installations";
 import { GitHubAccounts } from "./accounts";
+import {
+  createOverlayRouter,
+  overlayKeyInfo,
+  revokeOverlayKey,
+  rotateOverlayKey,
+} from "./overlay";
 import { ConfigError, parseBridgeConfig } from "../bridge/config";
 
 class PublicError extends Error {
@@ -354,6 +360,10 @@ export function createManagementServer(
       },
     );
   }
+  if (!options.bootstrap)
+    app.use(
+      createOverlayRouter(store, (mapping) => runtime.worker(mapping.id)?.api),
+    );
   if (
     !options.bootstrap &&
     options.webAuth &&
@@ -530,8 +540,26 @@ export function createManagementServer(
       webhookUrl: options.publicUrl
         ? `${new URL(options.publicUrl).origin}/github-webhook`
         : undefined,
+      overlay: {
+        ...overlayKeyInfo(store),
+        configured: Boolean(overlayKeyInfo(store)),
+        url: options.publicUrl
+          ? `${new URL(options.publicUrl).origin}/overlay/milestone`
+          : undefined,
+      },
     }),
   );
+  app.post("/api/overlay-key", (_req, res) => {
+    const key = rotateOverlayKey(store);
+    store.audit("admin", "generated a new stream overlay key");
+    // The only time the key is returned: just its hash is stored.
+    res.json({ ok: true, key });
+  });
+  app.post("/api/overlay-key/revoke", (_req, res) => {
+    revokeOverlayKey(store);
+    store.audit("admin", "revoked the stream overlay key");
+    res.json({ ok: true });
+  });
   app.post(
     "/api/discord-oauth",
     action((req, res) => {

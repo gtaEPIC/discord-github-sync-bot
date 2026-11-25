@@ -179,6 +179,17 @@ For immediate GitHub updates, save a shared webhook secret in the management pag
 
 Unmapped repositories cannot create work. Events are routed by full repository name and committed to that mapping's durable queue before acknowledgement. Pull requests are excluded. Pings return 200; accepted issue changes return 202. Paused mappings acknowledge events without processing them; recovery scans reconcile current state on resume.
 
+### Stream overlay feed (fork)
+
+`GET /overlay/milestone` returns one milestone's issues, each with a `state` of `todo`, `in_progress` or `done`, for a stream overlay such as an OBS browser source. Closed issues are `done`. Open issues follow their Projects Status: `In Progress` (also `Doing`, `Started`, `In Review`) is `in_progress`, `Done` is `done`, and anything else, or no Status, is `todo`. When the mapping has no Status sync, or the Projects token fails, every open issue is `todo` and the response has a `warning`.
+
+- Auth: `Authorization: Bearer <key>`. Generate the key under **Admin -> Connections -> Stream overlay**. It is read-only and shown once, since only its hash is stored. Generating a new key replaces the old one.
+- Query: `milestone` (a number or a title; default: the open milestone due soonest) and `repo=owner/name` (needed only when several repositories are mapped).
+- Responses are cached for 30 seconds per milestone, so polling overlays cost GitHub at most two REST calls per milestone in that time. CORS allows any origin, because an OBS local file has none; the key is the only credential.
+- Response: `{ repository, milestone: { number, title, state, dueOn, url }, counts: { todo, inProgress, done, total }, tasks: [{ number, title, url, state, status, closedReason, labels, assignees }], warning?, updatedAt }`. Tasks are ordered in progress first, then to-do, then the most recently closed.
+
+Like the webhook, `/overlay/*` must be reachable without Cloudflare Access.
+
 With the deployed Cloudflare Tunnel, the public hostname is `gitissues.rmush.dev` and `cloudflared` runs in LXC 109. The application requires `PUBLIC_URL=https://gitissues.rmush.dev` in the service environment. The tunnel forwards the dashboard, its assets/API, and the webhook to `http://127.0.0.1:5000`; authentication protects management routes. The private setup port is never forwarded. Avoid Cloudflare Access login or browser challenges on `/github-webhook`, since GitHub cannot complete those interactions.
 
 ## Deployment

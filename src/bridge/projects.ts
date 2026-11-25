@@ -181,13 +181,16 @@ export class ProjectsClient {
     return map;
   }
 
+  /** The whole board, from the last scan while it is younger than the TTL. Do not mutate. */
+  async board(): Promise<ReadonlyMap<number, ProjectItem>> {
+    if (!this.items || Date.now() - this.items.at > this.options.ttl)
+      return this.scan();
+    return this.items.map;
+  }
+
   /** One issue's item. Cached from the last scan unless `fresh`; null when it is not on the board. */
   async item(number: number, fresh = false): Promise<ProjectItem | null> {
-    if (!fresh) {
-      if (!this.items || Date.now() - this.items.at > this.options.ttl)
-        await this.scan();
-      return this.items!.map.get(number) ?? null;
-    }
+    if (!fresh) return (await this.board()).get(number) ?? null;
     const { item } = await this.issue(number);
     return item;
   }

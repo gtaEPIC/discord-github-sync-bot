@@ -240,3 +240,24 @@ export interface Platforms {
   send(thread: string, body: string, nonce: string): Promise<string>;
   edit(thread: string, id: string, body: string): Promise<void>;
 }
+
+/** A repository milestone, as the stream overlay reads it. */
+export interface Milestone {
+  number: number;
+  title: string;
+  state: "open" | "closed";
+  dueOn: string | null;
+  url: string;
+}
+
+/** An issue in a milestone, as the stream overlay reads it. */
+export interface MilestoneIssue {
+  number: number;
+  title: string;
+  url: string;
+  state: "open" | "closed";
+  stateReason: string | null;
+  labels: { name: string; color: string }[];
+  assignees: string[];
+  closedAt: string | null;
+}
