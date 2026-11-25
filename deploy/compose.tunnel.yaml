@@ -1,0 +1,18 @@
+# Optional add-on to compose.yaml for a cloudflared that runs in its own container.
+# Joins cloudflared's Docker network, so the tunnel reaches the bridge at
+# http://ry-issue-bridge:5000 without any port open on the host.
+#   TUNNEL_NETWORK  required: the Docker network the cloudflared container is on
+#                   (not "bridge": the default network has no container names)
+# Use both files, e.g. Komodo File Paths: compose.yaml, compose.tunnel.yaml
+services:
+  bot:
+    networks:
+      default: {}
+      tunnel:
+        aliases:
+          - ry-issue-bridge
+
+networks:
+  tunnel:
+    external: true
+    name: ${TUNNEL_NETWORK:?Set TUNNEL_NETWORK to the Docker network cloudflared is on}

@@ -39,12 +39,14 @@ In Komodo: **Stacks → New Stack**, name it (for example `ry-issue-bridge`), ch
 
 - `IMAGE_TAG` pins a version, so an update is a deliberate change and a rollback is the previous tag.
 - The data volume is named `ry-issue-bridge-data` regardless of the stack name. Never destroy it or run `docker compose down -v`.
-- If `cloudflared` runs in a container on another Docker network, it cannot reach `127.0.0.1` on the host. Either run it with host networking, or set `BIND_ADDRESS` to an address it can reach (such as the Docker bridge gateway, often `172.17.0.1`) and keep that port firewalled from the internet.
+- **cloudflared in a container** (it cannot reach `127.0.0.1` on the host): find its network, for example `docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' <cloudflared-container>`, then set **File Paths** to `compose.yaml, compose.tunnel.yaml` and add `TUNNEL_NETWORK=<that network>` to the environment. The bridge joins that network as `ry-issue-bridge`, and no host port needs to be reachable. If the network is `bridge` (Docker's default, which has no container names), create one (`docker network create tunnel`), connect cloudflared to it, and use that.
 - Never publish port 5001 (first-administrator setup). It stays inside the container.
 
 ## 4. Add the tunnel route
 
-Cloudflare dashboard → **Zero Trust → Networks → Tunnels** → your tunnel → **Public hostnames → Add**: hostname `issues.example.com`, service `http://localhost:5000` (or `http://bot:5000`, see above).
+Cloudflare dashboard → **Zero Trust → Networks → Tunnels** → your tunnel → **Public hostnames → Add**: hostname `issues.example.com`, service type `HTTP`, URL `ry-issue-bridge:5000` when cloudflared shares the network (step 3), or `localhost:5000` when it runs on the host.
+
+- Leave **HTTP Host Header** empty: the bridge only answers requests for the `PUBLIC_URL` hostname, which cloudflared passes through by default.
 
 - Do not put Cloudflare Access or a challenge on `/github-webhook`. If you add Access, scope it to `/admin*` only; the app also has its own login.
 - Check `https://issues.example.com/health` from outside.
