@@ -186,7 +186,7 @@ Unmapped repositories cannot create work. Events are routed by full repository n
 - Auth: `Authorization: Bearer <key>`. Generate the key under **Admin -> Connections -> Stream overlay**. It is read-only and shown once, since only its hash is stored. Generating a new key replaces the old one.
 - Query: `milestone` (a number or a title; default: the open milestone due soonest) and `repo=owner/name` (needed only when several repositories are mapped).
 - Responses are cached for 30 seconds per milestone, so polling overlays cost GitHub at most two REST calls per milestone in that time. CORS allows any origin, because an OBS local file has none; the key is the only credential.
-- Response: `{ repository, milestone: { number, title, state, dueOn, url }, counts: { todo, inProgress, done, total }, tasks: [{ number, title, url, state, status, closedReason, labels, assignees }], warning?, updatedAt }`. Tasks are ordered in progress first, then to-do, then the most recently closed.
+- Response: `{ repository, milestone: { number, title, state, dueOn, url }, counts: { todo, inProgress, done, total }, tasks: [{ number, title, url, state, status, closedReason, labels, assignees }], warning?, updatedAt }`. Tasks are grouped in progress, then to-do, then done, and each group follows the order of the Projects board (the API returns the board's manual order, not a view's sort). Issues not on the board, such as archived done items, come after the rest of their group: open ones by number, closed ones most recently closed first.
 
 Like the webhook, `/overlay/*` must be reachable without Cloudflare Access.
 

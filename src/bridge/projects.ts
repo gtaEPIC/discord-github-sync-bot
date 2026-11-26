@@ -21,6 +21,8 @@ export interface ProjectsOptions {
 export interface ProjectItem {
   id: string;
   status: string | null;
+  /** Place on the board (0 = top), counting every item; known only from a full scan. */
+  position?: number;
 }
 
 interface Project {
@@ -136,6 +138,8 @@ export class ProjectsClient {
     const project = await this.resolve();
     const map = new Map<number, ProjectItem>();
     let cursor: string | null = null;
+    // Items come back in the board's manual order, so a running count is the position.
+    let position = 0;
     do {
       const data: {
         node: {
@@ -164,7 +168,7 @@ export class ProjectsClient {
         this.project = undefined;
         throw refused("The project disappeared; it will be looked up again.");
       }
-      for (const item of data.node.items.nodes)
+      for (const item of data.node.items.nodes) {
         if (
           item.content?.number !== undefined &&
           this.matches(item.content.repository?.nameWithOwner)
@@ -172,7 +176,10 @@ export class ProjectsClient {
           map.set(item.content.number, {
             id: item.id,
             status: item.fieldValueByName?.name ?? null,
+            position,
           });
+        position++;
+      }
       cursor = data.node.items.pageInfo.hasNextPage
         ? data.node.items.pageInfo.endCursor
         : null;
@@ -278,7 +285,15 @@ export class ProjectsClient {
 
   private remember(number: number, item: ProjectItem | null) {
     if (!this.items) return;
-    if (item) this.items.map.set(number, item);
+    const position = this.items.map.get(number)?.position;
+    // A single-issue read does not know the position: keep the last scan's.
+    if (item)
+      this.items.map.set(
+        number,
+        item.id === this.items.map.get(number)?.id && position !== undefined
+          ? { ...item, position }
+          : item,
+      );
     else this.items.map.delete(number);
   }
 

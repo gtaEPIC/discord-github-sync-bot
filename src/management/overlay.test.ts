@@ -60,7 +60,8 @@ const mapping = (id: string, repo: string, enabled = true): Mapping => ({
 });
 
 function fakeSource(
-  board: Record<number, string | null> | undefined | Error = {},
+  /** Issue number and Status, in board order (top first). */
+  board: [number, string | null][] | undefined | Error = [],
 ): OverlaySource & { calls: () => number } {
   const milestoneIssues = vi.fn(async (n: number) =>
     n === 2
@@ -88,9 +89,9 @@ function fakeSource(
       if (board instanceof Error) throw board;
       if (!board) return undefined;
       return new Map(
-        Object.entries(board).map(([n, status]) => [
-          Number(n),
-          { id: `item-${n}`, status },
+        board.map(([n, status], position) => [
+          n,
+          { id: `item-${n}`, status, position },
         ]),
       );
     },
@@ -155,26 +156,38 @@ describe("overlay task states", () => {
     expect(currentMilestone([])).toBeUndefined();
   });
 
-  it("orders in progress, then to-do, then the latest done, with counts", async () => {
+  it("groups by state, then follows the board's order", async () => {
     const board = await buildBoard(
       "org/one",
-      fakeSource({ 3: "In Progress", 5: "Todo", 1: "Done" }),
+      fakeSource([
+        [5, "Todo"],
+        [1, "Done"],
+        [3, "In Progress"],
+        [2, null],
+      ]),
       undefined,
     );
     expect(board.milestone.title).toBe("v1.2 Signals");
+    // 4 is not on the board (done items are often archived), so it follows the board's.
     expect(board.tasks.map((t) => [t.number, t.state])).toEqual([
       [3, "in_progress"],
-      [2, "todo"],
       [5, "todo"],
-      [4, "done"],
+      [2, "todo"],
       [1, "done"],
+      [4, "done"],
     ]);
     expect(board.tasks.find((t) => t.number === 4)?.closedReason).toBe(
       "not_planned",
     );
-    expect(board.tasks[1].status).toBeNull();
+    expect(board.tasks.find((t) => t.number === 2)?.status).toBeNull();
+    expect(board.tasks[0]).not.toHaveProperty("position");
     expect(board.counts).toEqual({ todo: 2, inProgress: 1, done: 2, total: 5 });
     expect(board.warning).toBeUndefined();
+  });
+
+  it("orders issues off the board by number, and done ones latest closed first", async () => {
+    const board = await buildBoard("org/one", fakeSource(undefined), "2");
+    expect(board.tasks.map((t) => t.number)).toEqual([2, 3, 5, 4, 1]);
   });
 
   it("selects a milestone by number or title and refuses unknown ones", async () => {
@@ -229,7 +242,7 @@ describe("overlay endpoint", () => {
   });
 
   it("chooses the repository, and asks for ?repo= when several are mapped", async () => {
-    const { store, get } = setup(fakeSource({ 2: "In Progress" }));
+    const { store, get } = setup(fakeSource([[2, "In Progress"]]));
     const key = rotateOverlayKey(store);
     store.saveMapping(mapping("m1", "one"));
     store.saveMapping(mapping("m3", "paused", false));

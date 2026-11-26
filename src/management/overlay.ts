@@ -107,9 +107,11 @@ export async function buildBoard(
       "Project Status is unavailable; open issues are shown as to-do. Check the Projects token.";
   }
   const tasks = issues
-    .map((issue): OverlayTask & { closedAt: string | null } => {
-      const status = board?.get(issue.number)?.status ?? null;
+    .map((issue) => {
+      const item = board?.get(issue.number);
+      const status = item?.status ?? null;
       return {
+        position: item?.position ?? Infinity,
         number: issue.number,
         title: issue.title,
         url: issue.url,
@@ -121,14 +123,20 @@ export async function buildBoard(
         closedAt: issue.closedAt,
       };
     })
+    // By state, then board position. Issues not on the board (or archived from it) follow:
+    // the latest closed first among done ones, else by number.
     .sort(
       (a, b) =>
         ORDER[a.state] - ORDER[b.state] ||
+        (a.position === b.position ? 0 : a.position < b.position ? -1 : 1) ||
         (a.state === "done"
           ? (b.closedAt ?? "").localeCompare(a.closedAt ?? "")
           : a.number - b.number),
     )
-    .map(({ closedAt: _closedAt, ...task }) => task);
+    .map(
+      ({ closedAt: _closedAt, position: _position, ...task }): OverlayTask =>
+        task,
+    );
   const count = (state: TaskState) =>
     tasks.filter((t) => t.state === state).length;
   return {

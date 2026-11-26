@@ -85,11 +85,16 @@ describe("Projects v2 client", () => {
     });
     const items = await client.scan();
     expect([...items]).toEqual([
-      [1, { id: "I1", status: "In Progress" }],
-      [3, { id: "I3", status: "Backlog" }],
+      // Positions count every item on the board, including other repositories and drafts.
+      [1, { id: "I1", status: "In Progress", position: 0 }],
+      [3, { id: "I3", status: "Backlog", position: 3 }],
     ]);
     // Cached reads do not call GitHub again.
-    expect(await client.item(1)).toEqual({ id: "I1", status: "In Progress" });
+    expect(await client.item(1)).toEqual({
+      id: "I1",
+      status: "In Progress",
+      position: 0,
+    });
     expect(await client.item(2)).toBeNull();
     expect(calls).toHaveLength(3);
   });
